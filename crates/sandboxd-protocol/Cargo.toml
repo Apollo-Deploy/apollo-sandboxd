@@ -1,0 +1,19 @@
+[package]
+name = "sandboxd-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+ciborium.workspace = true
+serde_bytes = "0.11.19"
+zeroize = { version = "1.8.2", features = ["derive"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dev-dependencies]
+proptest = "1.9.0"

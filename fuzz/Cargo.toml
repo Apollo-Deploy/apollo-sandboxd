@@ -1,0 +1,33 @@
+[package]
+name = "sandboxd-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+[package.metadata]
+cargo-fuzz = true
+[dependencies]
+libfuzzer-sys = "0.4.10"
+sandboxd-protocol = { path = "../crates/sandboxd-protocol" }
+guest-protocol = { path = "../crates/guest-protocol" }
+firecracker-api = { path = "../crates/firecracker-api" }
+tokio = { version = "1.53.1", features = ["rt"] }
+[[bin]]
+name = "host"
+path = "fuzz_targets/host.rs"
+test = false
+doc = false
+bench = false
+[[bin]]
+name = "guest"
+path = "fuzz_targets/guest.rs"
+test = false
+doc = false
+bench = false
+[[bin]]
+name = "firecracker_http"
+path = "fuzz_targets/firecracker_http.rs"
+test = false
+doc = false
+bench = false
+[workspace]
+members = ["."]

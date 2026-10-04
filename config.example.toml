@@ -1,0 +1,70 @@
+# Structural example. Zero digests deliberately fail artifact validation.
+# No runtime binaries are downloaded at daemon startup.
+[daemon]
+socket = "/run/apollo-sandboxd/sandboxd.sock"
+socket_group = 0
+max_connections = 16
+request_timeout_seconds = 5
+
+[security]
+allowed_uids = [0]
+allowed_gids = [0]
+allowed_pids = []
+
+[state]
+directory = "/var/lib/apollo-sandboxd"
+event_retention = 10000
+
+# Only operator-selected regular files can be exposed as guest block volumes.
+[volume_catalog]
+max_total_bytes = 0
+entries = []
+# Example entry:
+# [[volume_catalog.entries]]
+# key = "shared-data"
+# path = "/var/lib/apollo-sandboxd/volumes/shared-data.img"
+# max_bytes = 1073741824
+# writable = false
+
+# Logical bytes include in-progress checkpoint reservations.
+[checkpoints]
+max_count = 64
+max_bytes_per_checkpoint = 68719476736
+max_total_bytes = 274877906944
+
+[[runtimes]]
+name = "fc-1-17-x86"
+version = "1.17.0"
+architecture = "x86_64"
+firecracker = "/opt/apollo-sandboxd/runtime/1.17.0/firecracker"
+firecracker_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+jailer = "/opt/apollo-sandboxd/runtime/1.17.0/jailer"
+jailer_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[[kernels]]
+name = "reference-x86"
+architecture = "x86_64"
+kernel = "/opt/apollo-sandboxd/kernel/reference/vmlinux"
+kernel_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+initramfs = "/opt/apollo-sandboxd/kernel/reference/initramfs.cpio"
+initramfs_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[identities]
+uid_first = 200000
+uid_last = 201023
+gid_first = 200000
+gid_last = 201023
+cid_first = 3
+cid_last = 1026
+
+[quotas]
+max_active_sandboxes = 1024
+max_booting_sandboxes = 32
+max_sandbox_identities = 100000
+max_operation_receipts = 1000000
+max_vcpus = 16
+max_memory_mib = 65536
+max_state_disk_mib = 65536
+
+[leases]
+max_seconds = 3600

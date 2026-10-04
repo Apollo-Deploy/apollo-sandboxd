@@ -1,0 +1,5 @@
+#!/usr/bin/env python3
+import os
+import sys
+arguments = [arg for arg in sys.argv[1:] if arg != "--target=aarch64-unknown-linux-musl"]
+os.execvp("zig", ["zig", "cc", "-target", "aarch64-linux-musl", *arguments])

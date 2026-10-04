@@ -1,0 +1,35 @@
+[package]
+name = "apollo-sandbox-guest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Trusted Firecracker guest supervisor"
+
+[dependencies]
+guest-protocol = { path = "../crates/guest-protocol" }
+sandboxd-protocol = { path = "../crates/sandboxd-protocol" }
+socket2 = { version = "0.5.10", features = ["all"] }
+nix = { version = "0.31.3", features = ["process", "signal", "term", "fs", "user", "mount", "ioctl"] }
+sha2.workspace = true
+ciborium.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+panic = "deny"
+
+[[bin]]
+name = "apollo-sandbox-guest"
+path = "src/main.rs"
+
+[[bin]]
+name = "apollo-sandbox-guest-bootstrap"
+path = "src/bootstrap.rs"

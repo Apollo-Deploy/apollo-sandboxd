@@ -1,0 +1,63 @@
+[Unit]
+Description=Standalone Firecracker sandbox daemon
+Documentation=file:/usr/share/doc/apollo-sandboxd/SYSTEMD.md
+After=local-fs.target
+ConditionPathExists=/dev/kvm
+ConditionPathExists=/etc/apollo-sandboxd/config.toml
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/local/bin/apollo-sandboxd --config /etc/apollo-sandboxd/config.toml
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=30s
+
+# The daemon's termination must preserve the independent jailer/VMM processes.
+# Their pidfds, per-VM cgroups and durable ownership records govern termination.
+KillMode=process
+SendSIGKILL=yes
+RuntimeDirectory=apollo-sandboxd asd
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+StateDirectory=apollo-sandboxd
+StateDirectoryMode=0700
+
+# /run/asd/firecracker must already be a distinct, private, root-owned mount.
+# The daemon validates this invariant and fails closed. Provision it during
+# trusted host boot; never install an overmount here during daemon restart.
+
+# Keep the service's process in a leaf, leaving its delegated parent free to
+# enable controllers for VM siblings. Requires systemd >= 254 and cgroup v2.
+Delegate=cpu memory pids io cpuset
+DelegateSubgroup=daemon
+MemoryAccounting=yes
+TasksAccounting=yes
+TasksMax=131072
+LimitNOFILE=65536
+LimitCORE=0
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_KILL CAP_MKNOD CAP_SETGID CAP_SETUID CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_SYS_RESOURCE
+AmbientCapabilities=
+DevicePolicy=closed
+DeviceAllow=/dev/kvm rwm
+DeviceAllow=/dev/net/tun rwm
+DeviceAllow=/dev/urandom rwm
+DeviceAllow=/dev/random rwm
+RestrictNamespaces=~user
+SystemCallArchitectures=native
+RestrictRealtime=yes
+LockPersonality=yes
+
+# These switches would create a daemon-private mount namespace. The current
+# recovery design requires staged bind mounts to survive in the host namespace.
+ProtectSystem=no
+ProtectHome=no
+PrivateTmp=no
+PrivateMounts=no
+
+[Install]
+WantedBy=multi-user.target

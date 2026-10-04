@@ -1,0 +1,17 @@
+/target/
+/qualification/local/
+*.db
+*.db-shm
+*.db-wal
+
+fuzz/target/
+fuzz/artifacts/
+fuzz/corpus/
+
+# Local review and qualification records are not published.
+/qualification/
+/docs/review/
+/docs/qualification/
+/docs/PRODUCTION_COMPLETION.md
+/docs/COMMANDS_RUN.md
+/docs/qualification-evidence.json
