@@ -14,9 +14,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const MAX_ENTRIES: usize = 32;
+const MAX_ENTRIES: usize = 96;
 const MAX_PID_BYTES: u64 = 32;
 const MAX_RUNTIME_BYTES: u64 = 4 << 30;
+
+mod sysfs_mirror;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -94,6 +96,7 @@ pub fn capture(
         }
         entries.push(entry);
     }
+    sysfs_mirror::capture(&manifest.jail_root, uid, gid, &mut entries)?;
     if entries.len() > MAX_ENTRIES {
         return Err(Error::Path);
     }
@@ -177,6 +180,7 @@ pub fn remove(manifest: &LaunchManifest, tree: &JailTreeManifest) -> Result<()> 
         }
         _ => None,
     };
+    let sys_directories = sysfs_mirror::open_directories(&tree.entries, root.as_ref())?;
     for entry in tree.entries.iter().rev() {
         if !allowed_entry(&entry.relative) {
             return Err(Error::Path);
@@ -192,6 +196,8 @@ pub fn remove(manifest: &LaunchManifest, tree: &JailTreeManifest) -> Result<()> 
             net.as_ref().map(PinnedDir::as_fd)
         } else if parent == Path::new("root/run") {
             run.as_ref().map(PinnedDir::as_fd)
+        } else if parent.starts_with("root/sys") {
+            sys_directories.get(parent).map(PinnedDir::as_fd)
         } else {
             return Err(Error::Path);
         };
@@ -234,7 +240,7 @@ fn allowed_entry(path: &Path) -> bool {
                 | "root/run/serial.log"
                 | "jailer.stderr"
         )
-    )
+    ) || sysfs_mirror::allowed_sysfs_entry(path)
 }
 
 fn remove_checked_fd(dir: BorrowedFd<'_>, name: &str, entry: &JailEntry) -> Result<()> {
@@ -370,6 +376,17 @@ fn reject_unknown(session: &Path, relative: &str, allowed: &[&str]) -> Result<()
         return Ok(());
     };
     for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !allowed.iter().any(|allowed| name == *allowed) {
+            return Err(Error::Path);
+        }
+    }
+    Ok(())
+}
+
+fn reject_sysfs_unknown(directory: &Path, allowed: &[&str]) -> Result<()> {
+    for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let name = entry.file_name();
         if !allowed.iter().any(|allowed| name == *allowed) {

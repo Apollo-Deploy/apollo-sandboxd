@@ -2,9 +2,10 @@ use crate::error::{Error, Result};
 use firecracker_api::{
     BootSource, Client, CpuTemplate, Drive, MachineConfiguration, SerialDevice, Vsock,
 };
-use sandboxd_protocol::Resources;
+use sandboxd_protocol::{Architecture, Resources};
 use std::path::Path;
 pub(super) struct ConfigureInputs<'a> {
+    pub architecture: Architecture,
     pub resources: &'a Resources,
     pub boot_args: &'a str,
     pub cid: u32,
@@ -15,7 +16,7 @@ pub(super) struct ConfigureInputs<'a> {
 }
 
 pub(super) async fn configure(client: &Client, input: &ConfigureInputs<'_>) -> Result<()> {
-    let cpu_template = cpu_template(input.resources.cpu_profile.as_deref())?;
+    let cpu_template = cpu_template(input.architecture, input.resources.cpu_profile.as_deref())?;
     client
         .machine(&MachineConfiguration {
             vcpu_count: input.resources.vcpus,
@@ -93,15 +94,19 @@ pub(super) async fn configure(client: &Client, input: &ConfigureInputs<'_>) -> R
     Ok(())
 }
 
-fn cpu_template(value: Option<&str>) -> Result<Option<CpuTemplate>> {
-    match value {
-        None | Some("none") => Ok(None),
-        Some("c3") => Ok(Some(CpuTemplate::C3)),
-        Some("t2") => Ok(Some(CpuTemplate::T2)),
-        Some("t2s") => Ok(Some(CpuTemplate::T2S)),
-        Some("t2cl") => Ok(Some(CpuTemplate::T2CL)),
-        Some(_) => Err(Error::Config(
+fn cpu_template(architecture: Architecture, value: Option<&str>) -> Result<Option<CpuTemplate>> {
+    match (architecture, value) {
+        (_, None | Some("none")) => Ok(None),
+        (Architecture::X86_64, Some("c3")) => Ok(Some(CpuTemplate::C3)),
+        (Architecture::X86_64, Some("t2")) => Ok(Some(CpuTemplate::T2)),
+        (Architecture::X86_64, Some("t2s")) => Ok(Some(CpuTemplate::T2S)),
+        (Architecture::X86_64, Some("t2cl")) => Ok(Some(CpuTemplate::T2CL)),
+        (Architecture::Aarch64, Some("v1n1")) => Ok(Some(CpuTemplate::V1N1)),
+        (Architecture::X86_64, Some(_)) => Err(Error::Config(
             "CPU profile is not allowed on the x86_64 runtime",
+        )),
+        (Architecture::Aarch64, Some(_)) => Err(Error::Config(
+            "CPU profile is not allowed on the aarch64 runtime",
         )),
     }
 }
@@ -123,10 +128,13 @@ fn rate_limiter(value: &sandboxd_protocol::RateLimiter) -> firecracker_api::Rate
 fn volume_drives(volumes: &[sandboxd_protocol::Volume]) -> Result<Vec<Drive>> {
     volumes
         .iter()
-        .map(|volume| {
+        .enumerate()
+        .map(|(slot, volume)| {
             let name = crate::volume_catalog::staged_name(volume.id.as_str())?;
             Ok(Drive {
-                drive_id: format!("volume-{}", volume.id.as_str()),
+                // Firecracker API endpoint IDs are alphanumeric; the public volume ID
+                // remains authoritative in the guest configuration and staged filename.
+                drive_id: format!("volume{slot}"),
                 path_on_host: format!("/{name}"),
                 is_root_device: false,
                 is_read_only: volume.read_only,
@@ -141,18 +149,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn x86_cpu_profiles_are_explicitly_allowlisted() {
-        assert!(matches!(cpu_template(None).unwrap(), None));
+    fn cpu_profiles_are_architecture_specific_and_explicitly_allowlisted() {
+        use sandboxd_protocol::Architecture::{Aarch64, X86_64};
+
+        assert!(matches!(cpu_template(X86_64, None).unwrap(), None));
         assert!(matches!(
-            cpu_template(Some("c3")).unwrap(),
+            cpu_template(X86_64, Some("c3")).unwrap(),
             Some(CpuTemplate::C3)
         ));
         assert!(matches!(
-            cpu_template(Some("t2cl")).unwrap(),
+            cpu_template(X86_64, Some("t2cl")).unwrap(),
             Some(CpuTemplate::T2CL)
         ));
-        assert!(cpu_template(Some("t2a")).is_err());
-        assert!(cpu_template(Some("arbitrary")).is_err());
+        assert!(cpu_template(X86_64, Some("t2a")).is_err());
+        assert!(cpu_template(X86_64, Some("v1n1")).is_err());
+        assert!(cpu_template(X86_64, Some("arbitrary")).is_err());
+        assert!(matches!(cpu_template(Aarch64, None).unwrap(), None));
+        assert!(matches!(
+            cpu_template(Aarch64, Some("v1n1")).unwrap(),
+            Some(CpuTemplate::V1N1)
+        ));
+        assert!(cpu_template(Aarch64, Some("t2a")).is_err());
+        assert!(cpu_template(Aarch64, Some("c3")).is_err());
+        assert!(cpu_template(Aarch64, Some("t2cl")).is_err());
+        assert!(cpu_template(Aarch64, Some("arbitrary")).is_err());
     }
 
     #[test]
@@ -160,6 +180,7 @@ mod tests {
         let volumes = [sandboxd_protocol::Volume {
             id: sandboxd_protocol::VolumeId::new("reports".to_owned()).unwrap(),
             catalog_key: "reports".into(),
+            backing: None,
             read_only: true,
             guest_mount_point: "/reports".into(),
             filesystem: "ext4".into(),
@@ -174,7 +195,7 @@ mod tests {
         }];
         let drives = volume_drives(&volumes).unwrap();
         assert_eq!(drives.len(), 1);
-        assert_eq!(drives[0].drive_id, "volume-reports");
+        assert_eq!(drives[0].drive_id, "volume0");
         assert_eq!(drives[0].path_on_host, "/volume-reports.img");
         assert!(!drives[0].is_root_device);
         assert!(drives[0].is_read_only);

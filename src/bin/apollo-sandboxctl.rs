@@ -5,7 +5,6 @@ use apollo_sandboxd::{
     error::{Error, Result},
 };
 use clap::{Args, Parser, Subcommand};
-use sandboxd_protocol::exec::SecretValue;
 use sandboxd_protocol::*;
 use std::{fs::File, io::Read, path::PathBuf, time::Duration};
 mod sandboxctl;
@@ -95,19 +94,12 @@ enum ImageCommandLine {
         #[arg(long, default_value_t = 64)]
         limit: u16,
     },
-    Pull {
-        reference: String,
+    ImportPrepared {
+        prepared_artifact_id: String,
+        manifest_digest: String,
+        lease_id: String,
         #[arg(long)]
-        operation: OperationId,
-        #[arg(long)]
-        operation_sequence: u64,
-        #[arg(long)]
-        username: Option<String>,
-        #[arg(long)]
-        password: Option<String>,
-    },
-    ImportLayout {
-        relative_layout: String,
+        architecture: String,
         #[arg(long)]
         operation: OperationId,
         #[arg(long)]
@@ -231,6 +223,7 @@ async fn run() -> Result<bool> {
         );
         return Ok(report.passed);
     }
+    let input_fds = Vec::new();
     let request = match cli.command {
         Command::Exec { target, command } => {
             return sandboxctl::exec::run(&cli.socket, target, command).await;
@@ -259,32 +252,26 @@ async fn run() -> Result<bool> {
                     .transpose()?,
                 limit,
             },
-            ImageCommandLine::Pull {
-                reference,
-                operation,
-                operation_sequence,
-                username,
-                password,
-            } => Request::Image {
-                operation: OperationId::with_sequence(operation_sequence, operation.as_str())
-                    .map_err(|_| Error::Config("operation ID/sequence is invalid"))?,
-                operation_sequence,
-                command: Box::new(sandboxd_protocol::ImageCommand::Pull {
-                    reference,
-                    username,
-                    password: password.map(SecretValue),
-                }),
-            },
-            ImageCommandLine::ImportLayout {
-                relative_layout,
+            ImageCommandLine::ImportPrepared {
+                prepared_artifact_id,
+                manifest_digest,
+                lease_id,
+                architecture,
                 operation,
                 operation_sequence,
             } => Request::Image {
                 operation: OperationId::with_sequence(operation_sequence, operation.as_str())
                     .map_err(|_| Error::Config("operation ID/sequence is invalid"))?,
                 operation_sequence,
-                command: Box::new(sandboxd_protocol::ImageCommand::ImportLayout {
-                    relative_layout,
+                command: Box::new(sandboxd_protocol::ImageCommand::ImportPrepared {
+                    prepared_artifact_id,
+                    manifest_digest,
+                    lease_id,
+                    architecture: match architecture.as_str() {
+                        "x86_64" => sandboxd_protocol::Architecture::X86_64,
+                        "aarch64" => sandboxd_protocol::Architecture::Aarch64,
+                        _ => return Err(Error::Config("unsupported image architecture")),
+                    },
                 }),
             },
         },
@@ -394,7 +381,17 @@ async fn run() -> Result<bool> {
             },
         },
     };
-    let result = client::call(&cli.socket, &request, Duration::from_secs(30)).await?;
+    let result = if input_fds.is_empty() {
+        client::call(&cli.socket, &request, Duration::from_secs(30)).await?
+    } else {
+        let (response, fds) =
+            client::call_with_fds(&cli.socket, &request, input_fds, Duration::from_secs(30))
+                .await?;
+        if !fds.is_empty() {
+            return Err(Error::State);
+        }
+        response
+    };
     println!(
         "{}",
         serde_json::to_string_pretty(&result).map_err(|_| Error::State)?

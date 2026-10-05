@@ -9,10 +9,21 @@ use std::{
 };
 
 #[test]
+#[ignore = "native Linux mount recovery; requires root, CAP_SYS_ADMIN, and util-linux"]
 fn recovery_removes_an_unjournaled_empty_root_skeleton() {
+    if run_in_isolated_namespace("recovery_removes_an_unjournaled_empty_root_skeleton") {
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let anchor_path = directory.path().join("firecracker");
     fs::create_dir(&anchor_path).unwrap();
+    fs::set_permissions(&anchor_path, fs::Permissions::from_mode(0o700)).unwrap();
+    rustix::mount::mount_bind_recursive(&anchor_path, &anchor_path).unwrap();
+    rustix::mount::mount_change(
+        &anchor_path,
+        rustix::mount::MountPropagationFlags::PRIVATE | rustix::mount::MountPropagationFlags::REC,
+    )
+    .unwrap();
     let session_path = anchor_path.join("session");
     let root_path = session_path.join("root");
     fs::create_dir_all(root_path.join("run")).unwrap();
@@ -51,6 +62,7 @@ fn recovery_removes_an_unjournaled_empty_root_skeleton() {
     recover_setup(&setup).unwrap();
 
     assert!(!session_path.exists());
+    asset_mount::unmount(&anchor_path).unwrap();
 }
 
 const ISOLATED_NAMESPACE_ENV: &str = "APOLLO_SANDBOXD_ASSET_RECOVERY_ISOLATED_NS";

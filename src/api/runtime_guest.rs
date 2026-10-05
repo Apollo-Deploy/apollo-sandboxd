@@ -9,7 +9,7 @@ use crate::{
 use guest_protocol::GuestMessage;
 use sandboxd_protocol::exec::{ExecOutputItem, ExecOutputPage, OutputPolicy};
 use sandboxd_protocol::{
-    ApiError, ErrorCode, Fence, GuestCommand, GuestReply, OperationId, Response,
+    ApiError, ErrorCode, ExecId, Fence, GuestCommand, GuestReply, OperationId, Response,
 };
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
@@ -19,6 +19,52 @@ use tokio::{
 };
 
 impl RuntimeService {
+    pub async fn exec_status(
+        &self,
+        peer: Peer,
+        fence: Fence,
+        exec: ExecId,
+        deadline: Instant,
+    ) -> Result<Response> {
+        if Instant::now() >= deadline {
+            return Err(deadline_error());
+        }
+        let key_fence = fence.clone();
+        let key = self
+            .state
+            .with_store(move |store| store.active_session_key(peer.uid, &key_fence, now_ms()?))
+            .await?;
+        let vm = self.current(peer.uid, &key).await?;
+        if vm.intent.key.sandbox_generation != fence.generation
+            || Some(vm.intent.key.generation) != fence.session_generation
+        {
+            return Err(
+                ApiError::new(ErrorCode::SessionUnavailable, "execution fence is stale").into(),
+            );
+        }
+        vm.process.verify()?;
+        if !vm.exec_router.contains(&exec)? {
+            return Err(ApiError::new(ErrorCode::ExecNotFound, "execution is not admitted").into());
+        }
+        let router = vm.exec_router.clone();
+        let status_exec = exec.clone();
+        let status = tokio::task::spawn_blocking(move || router.exit(&status_exec))
+            .await
+            .map_err(|_| Error::State)??;
+        let (exec, exit) = match status {
+            Some((exit_code, signal, timed_out)) => (
+                exec,
+                Some(sandboxd_protocol::ExecStatus {
+                    exit_code,
+                    signal,
+                    timed_out,
+                }),
+            ),
+            None => (exec, None),
+        };
+        Ok(Response::Guest(GuestReply::ExecStatus { exec, exit }))
+    }
+
     async fn router_ready(
         &self,
         vm: &Arc<super::runtime_service::LiveVm>,
@@ -63,6 +109,7 @@ impl RuntimeService {
             exec,
             request_digest,
             spec.output_policy,
+            spec.output_bytes,
         )?;
         let journal = OutputJournal::open(&path, exec.clone(), 256 << 20)?;
         let (stdout, stderr) = match sink_fds.len() {
@@ -82,8 +129,14 @@ impl RuntimeService {
             }
             _ => return Err(Error::Path),
         };
-        vm.exec_router
-            .register(exec.clone(), journal, stdout, stderr, spec.output_policy)?;
+        vm.exec_router.register(
+            exec.clone(),
+            journal,
+            stdout,
+            stderr,
+            spec.output_policy,
+            spec.output_bytes,
+        )?;
         Ok(true)
     }
 
@@ -199,7 +252,7 @@ impl RuntimeService {
                 tokio::task::spawn_blocking(move || router.list(cursor.as_ref(), page_size))
                     .await
                     .map_err(|_| Error::State)??;
-            let response = Response::Guest(GuestReply::ExecList(entries));
+            let response = Response::Guest(GuestReply::ExecList { entries });
             let saved = response.clone();
             self.state
                 .with_store(move |store| {
@@ -217,7 +270,9 @@ impl RuntimeService {
             | GuestCommand::ExecWait { exec }
             | GuestCommand::ExecAttach { exec, .. }
             | GuestCommand::ExecReplay { exec, .. } => Some(exec.clone()),
-            GuestCommand::ExecList { .. } | GuestCommand::File { .. } => None,
+            GuestCommand::ExecList { .. }
+            | GuestCommand::File { .. }
+            | GuestCommand::FilesystemExport { .. } => None,
         };
         if let Some(exec) = requested_exec.as_ref()
             && matches!(
@@ -353,6 +408,9 @@ fn guest_message(command: GuestCommand) -> GuestMessage {
         }
         GuestCommand::ExecList { .. } => unreachable!("host-only execution list command"),
         GuestCommand::File { request } => GuestMessage::File { request },
+        GuestCommand::FilesystemExport { .. } => {
+            unreachable!("host-only filesystem export command")
+        }
     }
 }
 

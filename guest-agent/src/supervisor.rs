@@ -1,23 +1,28 @@
+#[path = "supervisor_config.rs"]
+mod config;
+pub use config::Config;
+#[path = "supervisor_retirement.rs"]
+mod retirement;
+
 use crate::{exec::Manager, files, protocol};
-use guest_protocol::{BootNonce, GuestEnvelope, GuestMessage, SessionIdentity};
-use sandboxd_protocol::{OperationId, SandboxGeneration, SandboxId, SessionGeneration, SessionId};
+use guest_protocol::{GuestEnvelope, GuestMessage, SessionIdentity};
+use sandboxd_protocol::OperationId;
 use sha2::{Digest, Sha256};
 use socket2::Socket;
 #[cfg(target_os = "linux")]
 use socket2::{Domain, SockAddr, Type};
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
 use std::{
     fs::File,
     io::{Read, Write},
-    os::unix::fs::MetadataExt,
-    path::PathBuf,
 };
 
 #[cfg(target_os = "linux")]
 const VSOCK_CID_ANY: u32 = u32::MAX;
+#[cfg(target_os = "linux")]
+const VSOCK_CID_HOST: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -34,113 +39,14 @@ enum ConnectionResult {
     Rebind(SessionIdentity),
 }
 
-pub struct Config {
-    pub identity: SessionIdentity,
-    pub state: Option<File>,
-    pub network_tool: Option<File>,
-}
-
-impl Config {
-    pub fn from_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<Self, Error> {
-        let mut values = HashMap::new();
-        let mut iterator = args.into_iter();
-        let _program = iterator.next();
-        while let Some(arg) = iterator.next() {
-            let key = arg
-                .to_str()
-                .ok_or_else(|| Error::Config("argument is not UTF-8".into()))?;
-            let key = key
-                .strip_prefix("--")
-                .ok_or_else(|| Error::Config("arguments must use --key value".into()))?;
-            let value = iterator
-                .next()
-                .ok_or_else(|| Error::Config(format!("missing value for --{key}")))?;
-            let value = value
-                .into_string()
-                .map_err(|_| Error::Config(format!("value for --{key} is not UTF-8")))?;
-            if values.insert(key.to_owned(), value).is_some() {
-                return Err(Error::Config(format!("duplicate --{key}")));
-            }
-        }
-        let required = |name: &str| {
-            values
-                .get(name)
-                .cloned()
-                .ok_or_else(|| Error::Config(format!("missing --{name}")))
-        };
-        let nonce = required("boot-nonce")?;
-        let nonce =
-            hex::decode(nonce).map_err(|_| Error::Config("boot nonce must be hex".into()))?;
-        let boot_nonce: [u8; 32] = nonce
-            .try_into()
-            .map_err(|_| Error::Config("boot nonce must contain 32 bytes".into()))?;
-        let identity = SessionIdentity {
-            sandbox: SandboxId::new(required("sandbox")?)
-                .map_err(|_| Error::Config("invalid sandbox ID".into()))?,
-            sandbox_generation: parse_generation(&required("sandbox-generation")?)?,
-            session: SessionId::new(required("session")?)
-                .map_err(|_| Error::Config("invalid session ID".into()))?,
-            session_generation: parse_session_generation(&required("session-generation")?)?,
-            boot_nonce: BootNonce(boot_nonce),
-            vsock_cid: parse_u32(&required("vsock-cid")?)?,
-            protocol_version: guest_protocol::GUEST_PROTOCOL_VERSION,
-        };
-        identity
-            .authenticate(&identity)
-            .map_err(|_| Error::Config("invalid guest identity".into()))?;
-        let state = values
-            .get("state-fd")
-            .map(|value| {
-                let fd: i32 = value
-                    .parse()
-                    .map_err(|_| Error::Config("state fd is invalid".into()))?;
-                if fd < 0 {
-                    return Err(Error::Config("state fd is negative".into()));
-                }
-                let path = PathBuf::from(format!("/proc/self/fd/{fd}"));
-                let file = File::open(path)?;
-                let meta = file.metadata()?;
-                if !meta.is_dir() || meta.uid() != 0 {
-                    return Err(Error::Config(
-                        "state fd is not a root-owned directory".into(),
-                    ));
-                }
-                #[cfg(target_os = "linux")]
-                {
-                    let fs_type = nix::sys::statfs::fstatfs(&file)
-                        .map_err(|e| Error::Config(format!("inspect state filesystem: {e}")))?;
-                    if fs_type.filesystem_type() != nix::sys::statfs::EXT4_SUPER_MAGIC {
-                        return Err(Error::Config("state fd is not ext4".into()));
-                    }
-                }
-                Ok(file)
-            })
-            .transpose()?;
-        let network_tool = values
-            .get("network-tool-fd")
-            .map(|value| {
-                let fd: i32 = value
-                    .parse()
-                    .map_err(|_| Error::Config("network tool fd is invalid".into()))?;
-                if fd < 0 {
-                    return Err(Error::Config("network tool fd is negative".into()));
-                }
-                let file = File::open(format!("/proc/self/fd/{fd}"))?;
-                let meta = file.metadata()?;
-                if !meta.is_file() || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
-                    return Err(Error::Config(
-                        "network tool fd is not a trusted regular file".into(),
-                    ));
-                }
-                Ok(file)
-            })
-            .transpose()?;
-        Ok(Self {
-            identity,
-            state,
-            network_tool,
-        })
-    }
+struct ConnectionContext<'a> {
+    identity: SessionIdentity,
+    outgoing_rx: Receiver<GuestMessage>,
+    outgoing_tx: SyncSender<GuestMessage>,
+    manager: &'a mut Manager,
+    operations: &'a mut HashMap<OperationId, ([u8; 32], GuestMessage)>,
+    state: Option<&'a File>,
+    network_tool: Option<&'a File>,
 }
 
 pub fn run(config: Config) -> Result<(), Error> {
@@ -152,7 +58,15 @@ pub fn run(config: Config) -> Result<(), Error> {
     let mut manager = Manager::new(initial_tx);
     let mut operations = HashMap::new();
     loop {
-        let (stream, _) = listener.accept()?;
+        let (stream, _peer) = listener.accept()?;
+        // Firecracker's host endpoint is the only trusted control peer.  The
+        // guest can connect to this listener too, and the envelope identity is
+        // intentionally not a secret, so reject guest-local connections before
+        // they reach the protocol handshake.
+        #[cfg(target_os = "linux")]
+        if !is_host_peer(&_peer) {
+            continue;
+        }
         stream.set_write_timeout(Some(std::time::Duration::from_secs(1)))?;
         let reader = stream.try_clone()?;
         let (incoming_tx, incoming_rx) = sync_channel::<(u64, GuestEnvelope)>(128);
@@ -165,19 +79,27 @@ pub fn run(config: Config) -> Result<(), Error> {
             .map_err(|e| Error::Config(format!("control reader spawn failed: {e}")))?;
         match serve_connection(
             stream,
-            identity.clone(),
             incoming_rx,
-            outgoing_rx,
-            outgoing_tx,
-            &mut manager,
-            &mut operations,
-            state.as_ref(),
-            network_tool.as_ref(),
+            ConnectionContext {
+                identity: identity.clone(),
+                outgoing_rx,
+                outgoing_tx,
+                manager: &mut manager,
+                operations: &mut operations,
+                state: state.as_ref(),
+                network_tool: network_tool.as_ref(),
+            },
         ) {
             Ok(ConnectionResult::Rebind(next)) => identity = next,
             Ok(ConnectionResult::Closed) | Err(_) => {}
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn is_host_peer(peer: &SockAddr) -> bool {
+    peer.as_vsock_address()
+        .is_some_and(|(cid, _port)| cid == VSOCK_CID_HOST)
 }
 
 #[cfg(target_os = "linux")]
@@ -187,6 +109,18 @@ fn bind_vsock() -> Result<Socket, Error> {
     socket.bind(&SockAddr::vsock(VSOCK_CID_ANY, guest_protocol::GUEST_PORT))?;
     socket.listen(16)?;
     Ok(socket)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_host_cid_is_an_accepted_control_peer() {
+        assert!(is_host_peer(&SockAddr::vsock(VSOCK_CID_HOST, 1234)));
+        assert!(!is_host_peer(&SockAddr::vsock(3, 1234)));
+        assert!(!is_host_peer(&SockAddr::vsock(VSOCK_CID_ANY, 1234)));
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -215,15 +149,18 @@ fn read_loop<R: Read>(
 
 fn serve_connection<S: Read + Write + Send + 'static>(
     mut stream: S,
-    identity: SessionIdentity,
     incoming: Receiver<(u64, GuestEnvelope)>,
-    outgoing_rx: Receiver<GuestMessage>,
-    outgoing_tx: SyncSender<GuestMessage>,
-    manager: &mut Manager,
-    operations: &mut HashMap<OperationId, ([u8; 32], GuestMessage)>,
-    state: Option<&File>,
-    network_tool: Option<&File>,
+    context: ConnectionContext<'_>,
 ) -> Result<ConnectionResult, Error> {
+    let ConnectionContext {
+        identity,
+        outgoing_rx,
+        outgoing_tx,
+        manager,
+        operations,
+        state,
+        network_tool,
+    } = context;
     let mut freeze = crate::freeze::FreezeGuard::new(state);
     let boot_op = OperationId::new(protocol::BOOT_OPERATION)
         .map_err(|_| Error::Config("boot operation ID invalid".into()))?;
@@ -269,20 +206,24 @@ fn serve_connection<S: Read + Write + Send + 'static>(
         let receipt = hello_seen && is_receipted(&request);
         let request_fingerprint = receipt.then(|| fingerprint_message(&request)).transpose()?;
         let cached = request_fingerprint.as_ref().and_then(|fingerprint| {
-            operations.get(&operation).map(|(known, response)| {
-                if known == fingerprint {
-                    Ok(response.clone())
-                } else {
-                    Err(GuestMessage::Error {
-                        code: "operation ID conflict".into(),
-                    })
-                }
-            })
+            operations
+                .get(&operation)
+                .and_then(|(known, response)| (known == fingerprint).then(|| response.clone()))
+        });
+        let operation_conflict = request_fingerprint.as_ref().is_some_and(|fingerprint| {
+            operations
+                .get(&operation)
+                .is_some_and(|(known, _)| known != fingerprint)
         });
         let capacity_exhausted =
             receipt && !operations.contains_key(&operation) && operations.len() >= 1024;
-        let should_store = receipt && cached.is_none() && !capacity_exhausted;
-        let response = if matches!(request, GuestMessage::FilesystemQuiesce)
+        let should_store =
+            receipt && cached.is_none() && !operation_conflict && !capacity_exhausted;
+        let response = if operation_conflict {
+            GuestMessage::Error {
+                code: "operation ID conflict".into(),
+            }
+        } else if matches!(request, GuestMessage::FilesystemQuiesce)
             && cached.is_some()
             && !freeze.frozen()
         {
@@ -290,7 +231,7 @@ fn serve_connection<S: Read + Write + Send + 'static>(
                 code: "quiesce expired; use a fresh operation".into(),
             }
         } else if let Some(cached) = cached {
-            cached.unwrap_or_else(|response| response)
+            cached
         } else if freeze.frozen()
             && !matches!(
                 request,
@@ -348,6 +289,70 @@ fn serve_connection<S: Read + Write + Send + 'static>(
                     },
                     |file| sync_filesystems(file),
                 ),
+                GuestMessage::FilesystemExportBegin {
+                    volume_id,
+                    max_bytes,
+                    max_entries,
+                } => {
+                    if !manager.process_list().is_empty() {
+                        GuestMessage::Error {
+                            code: "customer processes are still running".into(),
+                        }
+                    } else if let Some(state) = state {
+                        match volume_id
+                            .as_ref()
+                            .map(crate::volumes::selected)
+                            .transpose()
+                            .and_then(|selected| {
+                                crate::filesystem_export::create_selected(
+                                    state,
+                                    &operation,
+                                    selected.as_ref(),
+                                    max_bytes,
+                                    max_entries,
+                                )
+                            }) {
+                            Ok(receipt) => GuestMessage::FilesystemExportReady {
+                                sha256: receipt.sha256,
+                                byte_len: receipt.byte_len,
+                                entry_count: receipt.entry_count,
+                            },
+                            Err(code) => GuestMessage::Error {
+                                code: bounded_error(code),
+                            },
+                        }
+                    } else {
+                        GuestMessage::Error {
+                            code: "filesystem export unavailable".into(),
+                        }
+                    }
+                }
+                GuestMessage::FilesystemExportRead { offset, max_bytes } => {
+                    let admitted_export = operations.get(&operation).is_some_and(|(_, receipt)| {
+                        matches!(receipt, GuestMessage::FilesystemExportReady { .. })
+                    });
+                    if !admitted_export {
+                        GuestMessage::Error {
+                            code: "filesystem export receipt not found".into(),
+                        }
+                    } else {
+                        state.as_ref().map_or_else(
+                            || GuestMessage::Error {
+                                code: "filesystem export unavailable".into(),
+                            },
+                            |state| match crate::filesystem_export::read(
+                                state, &operation, offset, max_bytes,
+                            ) {
+                                Ok((data, eof)) => {
+                                    GuestMessage::FilesystemExportChunk { offset, data, eof }
+                                }
+                                Err(code) => GuestMessage::Error {
+                                    code: bounded_error(code),
+                                },
+                            },
+                        )
+                    }
+                }
                 GuestMessage::FilesystemQuiesce => result(freeze.freeze()),
                 GuestMessage::FilesystemUnquiesce => result(freeze.thaw()),
                 GuestMessage::ConfigureNetwork { config } => {
@@ -374,13 +379,7 @@ fn serve_connection<S: Read + Write + Send + 'static>(
                     break;
                 }
                 GuestMessage::RetireOperation { operation: target } => {
-                    if operations.remove(&target).is_some() {
-                        GuestMessage::Ready
-                    } else {
-                        GuestMessage::Error {
-                            code: "operation receipt not found".into(),
-                        }
-                    }
+                    retirement::retire(state, operations, &target)
                 }
                 GuestMessage::RetireExec { exec } => result(manager.retire(&exec)),
                 _ if !hello_seen => GuestMessage::Error {
@@ -455,28 +454,7 @@ fn is_receipted(message: &GuestMessage) -> bool {
             | GuestMessage::FilesystemSync
             | GuestMessage::FilesystemQuiesce
             | GuestMessage::FilesystemUnquiesce
+            | GuestMessage::FilesystemExportBegin { .. }
             | GuestMessage::ConfigureVolumes { .. }
     )
-}
-fn parse_u32(value: &str) -> Result<u32, Error> {
-    value
-        .parse()
-        .map_err(|_| Error::Config("numeric identity value is invalid".into()))
-}
-fn parse_generation(value: &str) -> Result<sandboxd_protocol::SandboxGeneration, Error> {
-    SandboxGeneration::new(
-        value
-            .parse()
-            .map_err(|_| Error::Config("generation is invalid".into()))?,
-    )
-    .map_err(|e| Error::Config(e.into()))
-}
-
-fn parse_session_generation(value: &str) -> Result<SessionGeneration, Error> {
-    SessionGeneration::new(
-        value
-            .parse()
-            .map_err(|_| Error::Config("generation is invalid".into()))?,
-    )
-    .map_err(|e| Error::Config(e.into()))
 }

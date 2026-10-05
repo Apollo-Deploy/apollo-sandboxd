@@ -79,6 +79,7 @@ impl ExecEventRouter {
                     None,
                     None,
                     manifest.output_policy,
+                    manifest.output_bytes,
                 )?;
                 bridge.restore_transport_gap(&manifest.exec)?;
             }

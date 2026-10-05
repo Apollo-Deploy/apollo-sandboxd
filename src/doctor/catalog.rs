@@ -110,23 +110,8 @@ pub(super) fn inspect(report: &mut Report, config: &Config) {
             ),
         );
     }
-    if let Some(oci) = &execution.oci {
-        for (name, path) in [
-            ("oci_cache", &oci.cache_root),
-            ("oci_import", &oci.import_root),
-            ("oci_prepared", &oci.prepared_root),
-        ] {
-            directory(report, name, path, true, 1);
-        }
-        let formatter = crate::runtime::verify(&oci.formatter, &oci.formatter_sha256, true);
-        report.add(
-            "oci_formatter",
-            formatter.is_ok(),
-            formatter.err().map_or_else(
-                || "OCI ext4 formatter digest verified".into(),
-                |e| e.to_string(),
-            ),
-        );
+    if let Some(artifactd) = &execution.artifactd {
+        directory(report, "prepared_images", &artifactd.prepared_root, true, 1);
     }
     if let Some(path) = &execution.network_namespace_root {
         directory(report, "external_network_catalog", path, false, 1);

@@ -31,6 +31,8 @@ pub(crate) fn capture(catalog: &VolumeCatalog, requested: &[Volume]) -> Result<V
         pins.push(VolumePin {
             volume_id: volume.id.clone(),
             catalog_key: volume.catalog_key.clone(),
+            backing: None,
+            owner_uid: None,
             device: pinned.device,
             inode: pinned.inode,
             size_bytes: pinned.size_bytes,
@@ -81,7 +83,7 @@ fn entry<'a>(catalog: &'a VolumeCatalog, key: &str) -> Result<&'a VolumeCatalogE
         .ok_or(Error::Config("volume catalog key unavailable"))
 }
 
-fn open(entry: &VolumeCatalogEntry, read_only: bool) -> Result<OpenVolume> {
+pub(crate) fn open(entry: &VolumeCatalogEntry, read_only: bool) -> Result<OpenVolume> {
     let parent = entry.path.parent().ok_or(Error::Path)?;
     let name = entry
         .path
@@ -114,11 +116,11 @@ fn open(entry: &VolumeCatalogEntry, read_only: bool) -> Result<OpenVolume> {
     })
 }
 
-struct OpenVolume {
-    file: File,
-    device: u64,
-    inode: u64,
-    size_bytes: u64,
+pub(crate) struct OpenVolume {
+    pub file: File,
+    pub device: u64,
+    pub inode: u64,
+    pub size_bytes: u64,
 }
 
 pub(crate) fn staged_name(volume_id: &str) -> Result<String> {
@@ -153,6 +155,7 @@ mod tests {
         Volume {
             id: VolumeId::new("data".to_owned()).unwrap(),
             catalog_key: "data".into(),
+            backing: None,
             read_only,
             guest_mount_point: "/data".into(),
             filesystem: "ext4".into(),

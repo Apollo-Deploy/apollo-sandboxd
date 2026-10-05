@@ -31,6 +31,32 @@ pub(crate) fn digest_with_sinks(
 }
 
 impl Store {
+    pub(crate) fn active_session_key(
+        &mut self,
+        uid: u32,
+        fence: &Fence,
+        now: u64,
+    ) -> Result<SessionKey> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let record = lease::active(&tx, uid, fence, now)?;
+        let session = record.session.ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::SessionUnavailable,
+                "active guest session required",
+            )
+        })?;
+        let key = SessionKey {
+            sandbox: record.id,
+            sandbox_generation: record.generation,
+            session: session.id,
+            generation: session.generation,
+        };
+        tx.commit()?;
+        Ok(key)
+    }
+
     pub(crate) fn admit_guest_operation(
         &mut self,
         uid: u32,

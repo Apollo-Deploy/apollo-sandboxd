@@ -11,7 +11,6 @@ use crate::{
     error::{Error, Result},
     exec::ExecEventRouter,
     guest::GuestConnection,
-    image::{ImageCache, ImageLimits, ImageService},
     process::ProcessIdentity,
     runtime::VerifiedCatalogs,
     security::peer::Peer,
@@ -39,12 +38,12 @@ pub(super) struct LiveVm {
     pub manifest: LaunchManifest,
     pub guest: Mutex<Option<GuestConnection>>,
     pub exec_router: Arc<ExecEventRouter>,
+    pub(super) volume_locks: StdMutex<Vec<crate::volume_catalog::PinnedVolume>>,
     pub transport_epoch: std::sync::atomic::AtomicU64,
 }
 
 pub(super) struct RuntimeService {
     pub authority: Arc<RuntimeAuthority>,
-    pub images: Option<Arc<ImageService>>,
     pub checkpoints: Arc<crate::storage::CheckpointCatalog>,
     pub snapshots: Option<Arc<crate::snapshot::SnapshotCatalog>>,
     pub state: StateClient,
@@ -53,6 +52,7 @@ pub(super) struct RuntimeService {
     pub(super) queue: RuntimeQueue,
     pub(super) policy_running: AtomicBool,
     pub(super) policy_pending: StdMutex<HashMap<SandboxId, SessionKey>>,
+    pub(super) filesystem_export_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl RuntimeService {
@@ -115,9 +115,9 @@ impl RuntimeService {
         crate::security::path::SecureDir::open(&config.state.directory)?
             .ensure_private_directory("output")?;
         let authority = Arc::new(if cleanup {
-            RuntimeAuthority::new_for_cleanup(&config, catalogs)?
+            RuntimeAuthority::new_for_cleanup(&config, catalogs, state.clone())?
         } else {
-            RuntimeAuthority::new(&config, catalogs)?
+            RuntimeAuthority::new(&config, catalogs, state.clone())?
         });
         // Load the complete bounded-by-page catalog. A single 256-row query
         // would silently make later durable images unusable after restart.
@@ -136,27 +136,9 @@ impl RuntimeService {
             }
             cursor = page.last().map(|record| record.digest.clone());
         }
-        let images = config
-            .execution
-            .as_ref()
-            .and_then(|execution| execution.oci.as_ref())
-            .map(|oci| {
-                crate::security::path::SecureDir::open(&oci.import_root)?;
-                let cache = ImageCache::open(
-                    &oci.cache_root,
-                    ImageLimits {
-                        max_blob_bytes: oci.max_blob_bytes,
-                        max_cache_bytes: oci.max_cache_bytes,
-                        max_layers: oci.max_layers,
-                        max_entries: oci.max_entries,
-                        max_uncompressed_bytes: oci.max_uncompressed_bytes,
-                    },
-                )?;
-                ImageService::new(cache, &oci.import_root)
-                    .map(Arc::new)
-                    .map_err(crate::error::Error::from)
-            })
-            .transpose()?;
+        for record in state.with_store_blocking(|store| store.dynamic_volumes())? {
+            authority.register_dynamic_volume(&record)?;
+        }
         Ok(Arc::new(Self {
             snapshots: config
                 .snapshots
@@ -171,13 +153,13 @@ impl RuntimeService {
                 config.state.directory.join("checkpoints"),
             )?),
             authority,
-            images,
             queue: RuntimeQueue::new(config.quotas.max_booting_sandboxes as usize, 4)?,
             config,
             state,
             live: Mutex::new(HashMap::new()),
             policy_running: AtomicBool::new(false),
             policy_pending: StdMutex::new(HashMap::new()),
+            filesystem_export_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         }))
     }
 
@@ -219,7 +201,17 @@ impl RuntimeService {
                             }
                             let record = store.inspect(peer.uid, &fence.sandbox)?;
                             let pins = if control == SessionControl::Start {
-                                Some(authority.pins(&record.spec)?)
+                                {
+                                    store.validate_dynamic_volume_attachment(
+                                        peer.uid,
+                                        &record.spec.volumes,
+                                    )?;
+                                    Some(authority.pins_with_store(
+                                        peer.uid,
+                                        &record.spec,
+                                        Some(store),
+                                    )?)
+                                }
                             } else {
                                 None
                             };
@@ -325,7 +317,11 @@ impl RuntimeService {
         intent: LaunchIntent,
         boot: BootResult,
     ) -> Result<()> {
-        let BootResult { launch, guest } = boot;
+        let BootResult {
+            launch,
+            guest,
+            volume_locks,
+        } = boot;
         let router_root = self.session_output_root(&intent);
         let router = match if router_root.exists() {
             ExecEventRouter::restore(&router_root)
@@ -348,6 +344,7 @@ impl RuntimeService {
             manifest: launch.manifest,
             guest: Mutex::new(Some(guest)),
             exec_router: router.clone(),
+            volume_locks: StdMutex::new(volume_locks),
             transport_epoch: std::sync::atomic::AtomicU64::new(0),
         });
         if let Err(error) = self.insert(Arc::clone(&vm)).await {

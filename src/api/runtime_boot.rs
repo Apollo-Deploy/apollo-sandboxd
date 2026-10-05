@@ -37,6 +37,17 @@ pub(super) async fn start_with_snapshot(
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
         let mut artifacts = authority.artifacts(&intent.pins)?;
+        for (volume, pin) in artifacts.volumes.iter().zip(&intent.pins.volumes) {
+            if pin.backing.is_some() && !volume.read_only {
+                rustix::fs::fchown(
+                    &volume.file,
+                    Some(rustix::process::Uid::from_raw(intent.uid)),
+                    Some(rustix::process::Gid::from_raw(intent.gid)),
+                )?;
+                rustix::fs::fchmod(&volume.file, rustix::fs::Mode::from_raw_mode(0o644))?;
+                volume.file.sync_all()?;
+            }
+        }
         let execution = &authority.execution;
         let mut journal = RuntimeJournal {
             state,
@@ -182,7 +193,7 @@ pub(super) async fn start_with_snapshot(
             vsock_cid: intent.cid,
             protocol_version: GUEST_PROTOCOL_VERSION,
         };
-        handle.block_on(crate::session::boot(
+        let mut boot = handle.block_on(crate::session::boot(
             BootInputs {
                 launch: LaunchInputs {
                     intent: &intent,
@@ -206,7 +217,9 @@ pub(super) async fn start_with_snapshot(
                 restore_identity,
             },
             &mut journal,
-        ))
+        ))?;
+        boot.volume_locks = artifacts.volumes;
+        Ok(boot)
     })
     .await
     .map_err(|_| Error::State)?

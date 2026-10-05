@@ -10,5 +10,5 @@ pub use files::*;
 pub use handshake::*;
 pub use message::*;
 pub use status::*;
-pub const GUEST_PROTOCOL_VERSION: u16 = 1;
+pub const GUEST_PROTOCOL_VERSION: u16 = 2;
 pub const GUEST_PORT: u32 = 1024;

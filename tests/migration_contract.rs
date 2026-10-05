@@ -31,7 +31,29 @@ fn fixed_historical_versions_upgrade_to_current_schema() {
         let migrated: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("migrated version");
-        assert_eq!(migrated, 19, "historical version {version}");
+        assert_eq!(migrated, 20, "historical version {version}");
+        let columns: Vec<(String, String)> = connection
+            .prepare("PRAGMA table_info(diagnostic_reservations)")
+            .expect("diagnostic reservation table")
+            .query_map([], |row| Ok((row.get(1)?, row.get(2)?)))
+            .expect("diagnostic reservation columns")
+            .collect::<rusqlite::Result<_>>()
+            .expect("diagnostic reservation schema");
+        assert_eq!(
+            columns,
+            vec![
+                ("session_id".to_owned(), "TEXT".to_owned()),
+                ("session_uid".to_owned(), "INTEGER".to_owned()),
+                ("reserved_bytes".to_owned(), "INTEGER".to_owned()),
+            ],
+            "historical version {version} diagnostic reservation columns"
+        );
+        let reservations: i64 = connection
+            .query_row("SELECT COUNT(*) FROM diagnostic_reservations", [], |row| {
+                row.get(0)
+            })
+            .expect("migrated diagnostic reservations");
+        assert_eq!(reservations, 0, "historical version {version}");
     }
 }
 

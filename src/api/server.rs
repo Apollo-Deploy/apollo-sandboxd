@@ -1,5 +1,5 @@
 use super::{
-    codec, handlers,
+    handlers,
     runtime_service::RuntimeService,
     socket::Socket,
     state_worker::{self, StateClient},
@@ -86,9 +86,7 @@ async fn run(config: Config, store: Store, catalogs: Option<VerifiedCatalogs>) -
     };
     let socket = Socket::bind(&config.daemon).await?;
     if runtime.is_some() {
-        eprintln!(
-            "daemon API ready; native x86_64 runtime enabled; production qualification incomplete"
-        );
+        eprintln!("daemon API ready; native runtime enabled; production qualification incomplete");
     }
     let permits = Arc::new(Semaphore::new(usize::from(config.daemon.max_connections)));
     let mut clients = JoinSet::new();
@@ -163,11 +161,41 @@ async fn connection(
     let (id, request, sink_fds) = timeout_at(deadline, super::ancillary::recv_request(&mut stream))
         .await
         .map_err(|_| Error::State)??;
+    request.validate().map_err(|_| Error::Path)?;
     super::ancillary::validate_fd_count(&request, sink_fds.len())?;
-    if sink_fds.len() == 1 {
-        return Err(Error::Path);
-    }
-    let result = if let (
+    let mut response_fds = Vec::new();
+    let result = if let Some(runtime) = &runtime
+        && matches!(
+            request,
+            Request::Volume { .. } | Request::VolumeInspect { .. } | Request::VolumeRelease { .. }
+        ) {
+        runtime
+            .volume_request(peer, request, sink_fds, deadline)
+            .await
+    } else if let Some(runtime) = &runtime
+        && matches!(request, Request::FilesystemExport { .. })
+    {
+        #[cfg(target_os = "linux")]
+        let export = runtime.export_request(request, peer, deadline).await;
+        #[cfg(not(target_os = "linux"))]
+        let export: Result<(Response, std::os::fd::OwnedFd)> =
+            Err(sandboxd_protocol::ApiError::new(
+                sandboxd_protocol::ErrorCode::UnsupportedCapability,
+                "filesystem export requires Linux",
+            )
+            .into());
+        match export {
+            Ok((response, fd)) => {
+                response_fds.push(fd);
+                Ok(response)
+            }
+            Err(error) => Err(error),
+        }
+    } else if let (Some(runtime), Request::ExecStatus { fence, exec }) = (&runtime, &request) {
+        runtime
+            .exec_status(peer, fence.clone(), exec.clone(), deadline)
+            .await
+    } else if let (
         Some(runtime),
         Request::Guest {
             operation,
@@ -238,8 +266,11 @@ async fn connection(
     let response = result.unwrap_or_else(|error| Response::Error(error.api()));
     // Reserve a bounded write window so a deadline error can reach the caller.
     let write_deadline = Instant::now() + Duration::from_secs(1);
-    timeout_at(write_deadline, codec::write(&mut stream, id, &response))
-        .await
-        .map_err(|_| Error::State)??;
+    timeout_at(
+        write_deadline,
+        super::response_transport::send(&mut stream, id, &response, &response_fds),
+    )
+    .await
+    .map_err(|_| Error::State)??;
     Ok(())
 }

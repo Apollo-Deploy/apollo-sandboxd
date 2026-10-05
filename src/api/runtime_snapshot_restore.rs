@@ -85,7 +85,12 @@ impl RuntimeService {
             .state
             .with_store(move |store| Ok(store.inspect(uid, &sandbox)?.spec))
             .await?;
-        let pins = self.authority.pins(&spec)?;
+        self.state.with_store_blocking({
+            let volumes = spec.volumes.clone();
+            let uid = intent.uid;
+            move |s| s.validate_dynamic_volume_attachment(uid, &volumes)
+        })?;
+        let pins = self.authority.pins(intent.uid, &spec)?;
         if pins != intent.record.source.pins
             || manifest.runtime_profile != pins.runtime_profile
             || manifest.runtime_version != pins.runtime_version

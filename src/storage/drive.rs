@@ -280,7 +280,7 @@ fn anonymous_file(directory: &SecureDir) -> Result<File> {
 }
 
 #[cfg(target_os = "linux")]
-fn run_formatter(formatter_fd: i32, target_fd: i32) -> Result<()> {
+pub(crate) fn run_formatter(formatter_fd: i32, target_fd: i32) -> Result<()> {
     let formatter = format!("/proc/self/fd/{formatter_fd}");
     let target = format!("/proc/{}/fd/{target_fd}", std::process::id());
     let mut child = Command::new(formatter)

@@ -31,6 +31,7 @@ pub struct BootInputs<'a> {
 pub struct BootResult {
     pub launch: LaunchResult,
     pub guest: GuestConnection,
+    pub(crate) volume_locks: Vec<crate::volume_catalog::PinnedVolume>,
 }
 
 /// Launches through the mandatory jailer path, then waits for a pinned
@@ -130,6 +131,7 @@ pub async fn boot(input: BootInputs<'_>, journal: &mut dyn BootJournal) -> Resul
             .enumerate()
             .map(|(index, volume)| {
                 Ok(guest_protocol::GuestVolumeConfig {
+                    volume_id: volume.id.clone(),
                     device_index: u8::try_from(index).map_err(|_| Error::State)?,
                     mount_point: volume.guest_mount_point.clone(),
                     filesystem: volume.filesystem.clone(),
@@ -187,6 +189,7 @@ pub async fn boot(input: BootInputs<'_>, journal: &mut dyn BootJournal) -> Resul
     Ok(BootResult {
         launch: launched,
         guest,
+        volume_locks: Vec::new(),
     })
 }
 

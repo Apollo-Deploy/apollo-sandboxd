@@ -14,7 +14,7 @@ fn fixture() -> (
     fs::create_dir(&source).unwrap();
     fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
     let exec = ExecId::new("exec").unwrap();
-    ExecEventRouter::prepare_manifest(&source, &exec, [1; 32], OutputPolicy::Disabled).unwrap();
+    ExecEventRouter::prepare_manifest(&source, &exec, [1; 32], OutputPolicy::Disabled, 0).unwrap();
     let mut journal = OutputJournal::open(&source, exec.clone(), 1 << 20).unwrap();
     journal
         .append(guest_protocol::Stream::Stdout, 1, 0, b"preserved")

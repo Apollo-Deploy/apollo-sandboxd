@@ -41,6 +41,7 @@ pub struct JailerLaunch {
 /// Constructs the only supported VMM launch path. This function does not
 /// spawn: callers must persist the session intent before calling it, and must
 /// retain `stage` and `cgroup` until process identity is recorded.
+#[allow(unsafe_code)] // pre_exec performs only the inherited file-size limit syscall.
 pub fn build_jailer_command(
     spec: &mut JailerLaunchSpec,
     runtime: &VerifiedRuntime,

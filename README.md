@@ -23,10 +23,11 @@ cargo build --locked --workspace
 cargo test --locked --workspace --all-targets
 ```
 
-Runtime execution requires Linux x86_64, KVM, a verified matching Firecracker/jailer
+Runtime execution requires native Linux x86_64 or aarch64, KVM, a verified matching Firecracker/jailer
 pair, and configured kernel/initramfs assets. Missing isolation prerequisites fail
 closed. The example configuration contains placeholder paths and hashes; replace
-them with verified operator-owned assets before use.
+them with verified operator-owned assets before use. ARM boot and the new per-execution
+isolation/export contracts require native qualification before production use.
 
 ```sh
 apollo-sandboxctl --help

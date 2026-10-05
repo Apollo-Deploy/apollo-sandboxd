@@ -1,6 +1,9 @@
 //! Trusted initramfs PID1 bootstrap. It mounts the guest root and executes the
 //! supervisor through an fd opened before any customer filesystem is visible.
 
+#[path = "bootstrap_cgroup.rs"]
+mod exec_cgroup;
+
 #[cfg(target_os = "linux")]
 mod linux {
     use nix::mount::{MsFlags, mount};
@@ -32,6 +35,7 @@ mod linux {
             clear_close_on_exec(tool)?;
         }
         switch_root()?;
+        super::exec_cgroup::initialize()?;
         exec_agent(agent, identity, state_fd, network_tool)
     }
 
@@ -191,6 +195,15 @@ mod linux {
             None::<&str>,
         )
         .map_err(|e| format!("mount guest sysfs: {e}"))?;
+        ensure_mount_dir("/mnt/root/sys/fs/cgroup")?;
+        mount(
+            Some("cgroup2"),
+            "/mnt/root/sys/fs/cgroup",
+            Some("cgroup2"),
+            MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+            None::<&str>,
+        )
+        .map_err(|e| format!("mount guest cgroup v2: {e}"))?;
         mount(
             Some("devtmpfs"),
             "/mnt/root/dev",

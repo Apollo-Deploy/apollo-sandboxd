@@ -47,6 +47,12 @@ pub fn dispatch(
             from_sequence,
             limit,
         )?)),
+        Request::OperationInspect {
+            operation,
+            operation_sequence,
+        } => Ok(Response::OperationReceipt(Box::new(
+            store.inspect_operation(peer.uid, &operation, operation_sequence)?,
+        ))),
         Request::OperationWatermark => Ok(Response::OperationWatermark {
             accepted_sequence: store.operation_watermark(peer.uid)?,
         }),

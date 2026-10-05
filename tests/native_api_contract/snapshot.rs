@@ -124,6 +124,10 @@ pub(super) async fn qualify(
                 cwd: "/".into(),
                 uid: 0,
                 gid: 0,
+                supplementary_groups: Vec::new(),
+                readonly_root: false,
+                mounts: Vec::new(),
+                max_processes: 64,
                 environment: Default::default(),
                 secret_environment: Default::default(),
                 pty: None,
@@ -131,6 +135,7 @@ pub(super) async fn qualify(
                 timeout_ms: 300_000,
                 detached: true,
                 output_policy: OutputPolicy::BestEffort,
+                output_bytes: 0,
             }),
         },
     )

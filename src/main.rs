@@ -61,9 +61,12 @@ fn run() -> Result<()> {
         println!("structural configuration valid; artifacts and execution not qualified");
         return Ok(());
     }
-    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+    if !cfg!(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )) {
         return Err(Error::Config(
-            "unsupported host: current execution scope requires native Linux x86_64",
+            "unsupported host: native Linux x86_64 or aarch64 execution required",
         ));
     }
     if !args.cleanup_owned_sessions && !doctor::kvm_available() {

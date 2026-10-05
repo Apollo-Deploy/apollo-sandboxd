@@ -80,6 +80,28 @@ pub enum GuestMessage {
     FilesystemSync,
     FilesystemQuiesce,
     FilesystemUnquiesce,
+    /// Creates a frozen upper-only OCI layer spool outside the customer root.
+    FilesystemExportBegin {
+        #[serde(default)]
+        volume_id: Option<sandboxd_protocol::VolumeId>,
+        max_bytes: u64,
+        max_entries: u32,
+    },
+    FilesystemExportReady {
+        sha256: String,
+        byte_len: u64,
+        entry_count: u32,
+    },
+    FilesystemExportRead {
+        offset: u64,
+        max_bytes: u32,
+    },
+    FilesystemExportChunk {
+        offset: u64,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+        eof: bool,
+    },
     /// Applies the operator-authorized guest network configuration.  The
     /// host TAP/netns is attached by Firecracker; this message only configures
     /// the guest interface after the authenticated boot handshake.
@@ -139,6 +161,7 @@ pub struct GuestAddress {
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct GuestVolumeConfig {
+    pub volume_id: sandboxd_protocol::VolumeId,
     /// Zero is `/dev/vdc`; state occupies `/dev/vdb`.
     pub device_index: u8,
     pub mount_point: String,
@@ -180,6 +203,38 @@ impl GuestEnvelope {
             {
                 Err("file result limit")
             }
+            GuestMessage::FilesystemExportRead { max_bytes, .. }
+                if *max_bytes == 0 || *max_bytes > 60 * 1024 =>
+            {
+                Err("filesystem export chunk bounds")
+            }
+            GuestMessage::FilesystemExportBegin {
+                volume_id: _,
+                max_bytes,
+                max_entries,
+            } if *max_bytes == 0
+                || *max_bytes > sandboxd_protocol::MAX_FILESYSTEM_EXPORT_BYTES
+                || *max_entries == 0
+                || *max_entries > sandboxd_protocol::MAX_FILESYSTEM_EXPORT_ENTRIES =>
+            {
+                Err("filesystem export limits")
+            }
+            GuestMessage::FilesystemExportChunk { data, offset, .. }
+                if data.len() > 60 * 1024 || offset.checked_add(data.len() as u64).is_none() =>
+            {
+                Err("filesystem export chunk bounds")
+            }
+            GuestMessage::FilesystemExportReady {
+                sha256,
+                byte_len,
+                entry_count,
+            } if sha256.len() != 64
+                || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || *byte_len == 0
+                || *entry_count == 0 =>
+            {
+                Err("filesystem export receipt bounds")
+            }
             GuestMessage::ExecResizePty { size, .. }
                 if size.rows == 0
                     || size.columns == 0
@@ -201,13 +256,15 @@ impl GuestEnvelope {
 }
 
 fn validate_volumes(volumes: &[GuestVolumeConfig]) -> Result<(), &'static str> {
+    let mut ids = std::collections::BTreeSet::new();
     let mut mount_points = std::collections::BTreeSet::new();
     if volumes.len() > 16 {
         return Err("guest volume count limit");
     }
     for (index, volume) in volumes.iter().enumerate() {
         let path = volume.mount_point.as_str();
-        if usize::from(volume.device_index) != index
+        if !ids.insert(&volume.volume_id)
+            || usize::from(volume.device_index) != index
             || !mount_points.insert(path)
             || path.len() > 4096
             || !path.starts_with('/')
@@ -273,6 +330,7 @@ mod volume_tests {
 
     fn volume(device_index: u8, mount_point: &str) -> GuestVolumeConfig {
         GuestVolumeConfig {
+            volume_id: sandboxd_protocol::VolumeId::new(format!("volume-{device_index}")).unwrap(),
             device_index,
             mount_point: mount_point.into(),
             filesystem: "ext4".into(),

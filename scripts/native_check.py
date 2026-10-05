@@ -10,12 +10,17 @@ import subprocess
 import tarfile
 from pathlib import Path
 
-from revision import ROOT, evidence
+from revision import ARTIFACTD_PROTOCOL, ROOT, evidence
 
 REMOTE = r'''
 import hashlib, io, json, os, pathlib, platform, signal, subprocess, sys, tarfile, tempfile
 fixture = pathlib.Path(tempfile.mkdtemp(prefix="sandboxd-native-check.", dir="/var/tmp"))
 fixture.chmod(0o700)
+# SSH non-login commands may skip the account's shell profile. Include the
+# standard per-user Rust toolchain bin directory for both probes and builds.
+cargo_bin = pathlib.Path.home() / ".cargo" / "bin"
+if cargo_bin.is_dir():
+    os.environ["PATH"] = str(cargo_bin) + os.pathsep + os.environ.get("PATH", "")
 archive = sys.stdin.buffer.read(16 * 1024 * 1024 + 1)
 if len(archive) > 16 * 1024 * 1024:
     raise SystemExit("source archive exceeds bound")
@@ -31,20 +36,26 @@ with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as stream:
 manifest = (fixture / "sources.sha256").read_bytes()
 for line in manifest.decode().splitlines():
     digest, name = line.split("  ", 1)
-    if hashlib.sha256((fixture / name).read_bytes()).hexdigest() != digest:
+    source = fixture / name
+    if name.startswith("artifactd-protocol/"):
+        source = fixture / "apollo-artifactd" / "crates" / "artifactd-protocol" / name.removeprefix("artifactd-protocol/")
+    else:
+        source = fixture / "apollo-sandboxd" / name
+    if hashlib.sha256(source.read_bytes()).hexdigest() != digest:
         raise SystemExit("source digest mismatch")
 def probe(argv):
     result = subprocess.run(argv, text=True, capture_output=True, timeout=10)
     return {"command": argv, "exit": result.returncode, "output": result.stdout.strip()}
 record = {
     "fixture": str(fixture), "source_sha256": hashlib.sha256(manifest).hexdigest(),
-    "cargo_lock_sha256": hashlib.sha256((fixture / "Cargo.lock").read_bytes()).hexdigest(),
+    "cargo_lock_sha256": hashlib.sha256((fixture / "apollo-sandboxd" / "Cargo.lock").read_bytes()).hexdigest(),
     "architecture": platform.machine(), "kernel": platform.release(),
     "os_release": pathlib.Path("/etc/os-release").read_text(),
     "cpu": probe(["lscpu"]), "rust": probe(["rustc", "--version", "--verbose"]),
     "cargo": probe(["cargo", "--version"]), "commands": [], "binary_sha256": {}}
-if platform.system() != "Linux" or platform.machine() != "x86_64":
-    raise SystemExit("native x86_64 Linux required")
+expected_architecture = (fixture / "native-architecture").read_text().strip()
+if platform.system() != "Linux" or platform.machine() != expected_architecture:
+    raise SystemExit("native %s Linux required" % expected_architecture)
 commands = json.loads((fixture / "commands.json").read_text())
 environment = dict(os.environ, CARGO_BUILD_JOBS="2", CARGO_TARGET_DIR=str(fixture / "target"))
 failed = False
@@ -52,7 +63,7 @@ for index, argv in enumerate(commands):
     output = fixture / ("command-%02d.log" % index)
     with output.open("wb") as log:
         try:
-            process = subprocess.Popen(argv, cwd=fixture, env=environment, stdout=log,
+            process = subprocess.Popen(argv, cwd=fixture / "apollo-sandboxd", env=environment, stdout=log,
                 stderr=subprocess.STDOUT, start_new_session=True)
             code = process.wait(timeout=600)
         except subprocess.TimeoutExpired:
@@ -62,6 +73,8 @@ for index, argv in enumerate(commands):
     record["commands"].append({"command": argv, "exit": code, "output": output.name})
     failed |= code != 0
     print(json.dumps({"command": argv, "exit": code, "fixture": str(fixture)}), flush=True)
+    if code != 0:
+        print(output.read_text(errors="replace")[-8192:], flush=True)
 for path in (fixture / "target").rglob("*"):
     if path.is_file() and path.stat().st_mode & 0o111:
         with path.open("rb") as stream:
@@ -72,7 +85,11 @@ for path in (fixture / "target").rglob("*"):
 # runner invokes strace under sudo, so copy only the known owned prefix via
 # sudo before archiving; missing files are retained as an explicit probe
 # result instead of silently disappearing.
-trace_prefix = pathlib.Path("/var/lib/apollo-sandboxd/native-boot/strace")
+trace_prefix = pathlib.Path(
+    "/var/lib/apollo-sandboxd/native-arm64/strace"
+    if expected_architecture == "aarch64"
+    else "/var/lib/apollo-sandboxd/native-boot/strace"
+)
 trace_result = {"prefix": str(trace_prefix), "files": [], "bytes": 0, "error": None}
 listed = subprocess.run(
     ["sudo", "-n", "find", str(trace_prefix.parent), "-maxdepth", "1",
@@ -125,6 +142,7 @@ def main():
     parser.add_argument("--commands", required=True, type=Path,
                         help="JSON array of exact command argument arrays")
     parser.add_argument("--label", default="native-x86")
+    parser.add_argument("--architecture", choices=("x86_64", "aarch64"), default="x86_64")
     args = parser.parse_args()
     if not args.label.replace("-", "").replace("_", "").isalnum():
         raise SystemExit("invalid evidence label")
@@ -144,9 +162,17 @@ def main():
     with tarfile.open(fileobj=archive, mode="w:gz") as stream:
         for line in manifest.read_text().splitlines():
             _, name = line.split("  ", 1)
-            stream.add(ROOT / name, arcname=name, recursive=False)
+            if name.startswith("artifactd-protocol/"):
+                relative = name.removeprefix("artifactd-protocol/")
+                source = ARTIFACTD_PROTOCOL / relative
+                arcname = "apollo-artifactd/crates/artifactd-protocol/" + relative
+            else:
+                source = ROOT / name
+                arcname = "apollo-sandboxd/" + name
+            stream.add(source, arcname=arcname, recursive=False)
         for name, data in (("sources.sha256", manifest.read_bytes()),
-                           ("commands.json", json.dumps(commands).encode())):
+                           ("commands.json", json.dumps(commands).encode()),
+                           ("native-architecture", args.architecture.encode())):
             member = tarfile.TarInfo(name)
             member.size, member.mode = len(data), 0o600
             stream.addfile(member, io.BytesIO(data))

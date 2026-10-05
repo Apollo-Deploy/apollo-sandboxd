@@ -14,18 +14,21 @@ pub struct PreparedExt4 {
     pub bytes: u64,
 }
 
+/// Converts an Artifactd-verified prepared rootfs received over SCM_RIGHTS.
+/// The caller verifies the owning Artifactd endpoint before this function is
+/// reached; this boundary independently rejects writable or non-directory FDs.
 #[cfg(target_os = "linux")]
-pub fn build_read_only_ext4(
+pub fn build_read_only_ext4_from_fd(
     formatter: &mut VerifiedArtifact,
-    source_root: &std::path::Path,
+    source: &std::fs::File,
+    expected_owner_uid: u32,
     destination: &std::path::Path,
     bytes: u64,
     before_publish: &mut dyn FnMut(&PreparedExt4) -> Result<()>,
 ) -> Result<VerifiedArtifact> {
-    use rustix::fs::{AtFlags, Mode, OFlags};
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
     use sha2::{Digest, Sha256};
     use std::{
-        fs::File,
         os::{fd::AsRawFd, unix::fs::FileExt},
         process::{Command, Stdio},
         time::{Duration, Instant},
@@ -34,8 +37,15 @@ pub fn build_read_only_ext4(
     if !(1 << 20..=4 << 30).contains(&bytes) || !bytes.is_multiple_of(4096) {
         return Err(Error::Config("invalid prepared ext4 size"));
     }
-    super::rootfs::verify_extracted_root(source_root)?;
-    let source = SecureDir::open(source_root)?;
+    let source_stat = rustix::fs::fstat(source)?;
+    let source_flags = rustix::fs::fcntl_getfl(source)?;
+    if FileType::from_raw_mode(source_stat.st_mode) != FileType::Directory
+        || source_stat.st_uid != expected_owner_uid
+        || source_stat.st_mode & 0o222 != 0
+        || source_flags & OFlags::ACCMODE != OFlags::RDONLY
+    {
+        return Err(Error::Path);
+    }
     let parent = SecureDir::open(destination.parent().ok_or(Error::Path)?)?;
     let name = destination
         .file_name()
@@ -44,7 +54,7 @@ pub fn build_read_only_ext4(
     if name.is_empty() || name.contains('/') || name == "." || name == ".." {
         return Err(Error::Path);
     }
-    let output = File::from(rustix::fs::openat(
+    let output = std::fs::File::from(rustix::fs::openat(
         parent.as_fd(),
         ".",
         OFlags::RDWR | OFlags::TMPFILE | OFlags::CLOEXEC,
@@ -53,11 +63,7 @@ pub fn build_read_only_ext4(
     output.set_len(bytes)?;
     formatter.revalidate()?;
     let target = format!("/proc/{}/fd/{}", std::process::id(), output.as_raw_fd());
-    let tree = format!(
-        "/proc/{}/fd/{}",
-        std::process::id(),
-        source.as_fd().as_raw_fd()
-    );
+    let tree = format!("/proc/{}/fd/{}", std::process::id(), source.as_raw_fd());
     let mut child = Command::new(formatter.proc_fd_path())
         .env_clear()
         .args(["-t", "ext4", "-F", "-d", &tree, &target])
@@ -106,26 +112,13 @@ pub fn build_read_only_ext4(
         inode: metadata.st_ino,
         bytes,
     })?;
-    // O_TMPFILE has no pathname to remove on failure. NOREPLACE linkat leaves
-    // an existing artifact intact and the parent fsync makes publication durable.
     rustix::fs::linkat(
         rustix::fs::CWD,
-        &target,
+        format!("/proc/{}/fd/{}", std::process::id(), output.as_raw_fd()),
         parent.as_fd(),
         name,
         AtFlags::SYMLINK_FOLLOW,
     )?;
     rustix::fs::fsync(parent.as_fd())?;
     verify(destination, &digest, false)
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn build_read_only_ext4(
-    _formatter: &mut VerifiedArtifact,
-    _source_root: &std::path::Path,
-    _destination: &std::path::Path,
-    _bytes: u64,
-    _before_publish: &mut dyn FnMut(&PreparedExt4) -> Result<()>,
-) -> Result<VerifiedArtifact> {
-    Err(Error::Config("rootfs image preparation requires Linux"))
 }

@@ -35,6 +35,10 @@ pub struct SessionPins {
 pub struct VolumePin {
     pub volume_id: VolumeId,
     pub catalog_key: String,
+    #[serde(default)]
+    pub backing: Option<VolumeBacking>,
+    #[serde(default)]
+    pub owner_uid: Option<u32>,
     pub device: u64,
     pub inode: u64,
     pub size_bytes: u64,
@@ -79,6 +83,8 @@ impl SessionPins {
             || self.volumes.iter().zip(&spec.volumes).any(|(pin, volume)| {
                 pin.volume_id != volume.id
                     || pin.catalog_key != volume.catalog_key
+                    || pin.backing != volume.backing
+                    || pin.backing.is_some() != pin.owner_uid.is_some()
                     || pin.read_only != volume.read_only
                     || (pin.catalog_read_only && !pin.read_only)
                     || pin.device == 0

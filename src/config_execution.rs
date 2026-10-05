@@ -19,26 +19,18 @@ pub struct Execution {
     pub kernel_arguments: String,
     pub images: Vec<BaseImage>,
     #[serde(default)]
-    pub oci: Option<OciSettings>,
+    pub artifactd: Option<ArtifactdSettings>,
     #[serde(default)]
     pub network_namespace_root: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OciSettings {
-    pub cache_root: PathBuf,
-    pub import_root: PathBuf,
+pub struct ArtifactdSettings {
     pub prepared_root: PathBuf,
     pub prepared_size_mib: u32,
-    pub formatter: PathBuf,
-    pub formatter_sha256: String,
-    pub max_blob_bytes: u64,
-    pub max_cache_bytes: u64,
-    pub max_layers: u32,
-    pub max_entries: u64,
-    pub max_uncompressed_bytes: u64,
-    pub registries: Vec<String>,
+    pub socket: PathBuf,
+    pub server_uid: u32,
 }
 
 #[cfg(test)]
@@ -59,7 +51,7 @@ mod tests {
                 architecture: Architecture::X86_64,
                 path: "/opt/base.ext4".into(),
             }],
-            oci: None,
+            artifactd: None,
             network_namespace_root: None,
         }
     }
@@ -78,6 +70,20 @@ mod tests {
         let config = execution("/var/lib/apollo-sandboxd/native-boot");
         assert!(config.validate().is_err());
         assert!(config.validate_for_cleanup().is_ok());
+    }
+
+    #[test]
+    fn execution_rejects_invalid_artifactd_endpoint() {
+        let mut config = execution("/a");
+        config.artifactd = Some(ArtifactdSettings {
+            prepared_root: "/var/lib/apollo/prepared".into(),
+            prepared_size_mib: 512,
+            socket: "/run/artifactd.sock".into(),
+            server_uid: 1001,
+        });
+        assert!(config.validate().is_ok());
+        config.artifactd.as_mut().unwrap().server_uid = 0;
+        assert!(config.validate().is_err());
     }
 }
 
@@ -140,27 +146,14 @@ impl Execution {
                 return Err(Error::Path);
             }
         }
-        if let Some(oci) = &self.oci {
-            if !oci.cache_root.is_absolute()
-                || !oci.import_root.is_absolute()
-                || !oci.prepared_root.is_absolute()
-                || !oci.formatter.is_absolute()
-                || oci.formatter_sha256.len() != 64
-                || !oci.formatter_sha256.bytes().all(|c| c.is_ascii_hexdigit())
-                || oci.prepared_size_mib == 0
-                || oci.prepared_size_mib > 1_048_576
-                || oci.max_blob_bytes < 1 << 20
-                || oci.max_cache_bytes < oci.max_blob_bytes
-                || oci.max_layers == 0
-                || oci.max_layers > 256
-                || oci.max_entries == 0
-                || oci.max_uncompressed_bytes < 1 << 20
-                || oci.registries.len() > 128
-                || oci.registries.iter().any(|host| {
-                    host.is_empty() || host.len() > 255 || host.contains(['/', '\\', '\n', '\r'])
-                })
+        if let Some(artifactd) = &self.artifactd {
+            if !artifactd.prepared_root.is_absolute()
+                || artifactd.prepared_size_mib == 0
+                || artifactd.prepared_size_mib > 1_048_576
+                || !artifactd.socket.is_absolute()
+                || artifactd.server_uid == 0
             {
-                return Err(Error::Config("invalid OCI image settings"));
+                return Err(Error::Config("invalid artifactd endpoint"));
             }
         }
         // The generated session identity has 56 bytes. Include the longest

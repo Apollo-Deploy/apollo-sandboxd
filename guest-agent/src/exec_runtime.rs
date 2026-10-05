@@ -1,5 +1,6 @@
 use super::{OutputState, StdinRequest};
 use guest_protocol::{GuestMessage, OutputRecord, Stream};
+#[cfg(not(target_os = "linux"))]
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 use sandboxd_protocol::ExecId;
@@ -113,6 +114,7 @@ pub(super) fn wait_for_child(
     reader_count: usize,
     alive: Arc<AtomicBool>,
     lifecycle: Arc<Mutex<()>>,
+    #[cfg(target_os = "linux")] cgroup: crate::exec_cgroup::ExecCgroup,
     #[cfg(target_os = "linux")] known_children: Arc<Mutex<HashSet<Pid>>>,
 ) {
     let deadline = Duration::from_millis(u64::from(timeout_ms));
@@ -131,6 +133,9 @@ pub(super) fn wait_for_child(
             }
             Ok(None) if start.elapsed() >= deadline => {
                 timed_out = true;
+                #[cfg(target_os = "linux")]
+                let _ = cgroup.kill();
+                #[cfg(not(target_os = "linux"))]
                 let _ = killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
                 let _ = child.wait();
                 alive.store(false, Ordering::Release);
@@ -149,12 +154,24 @@ pub(super) fn wait_for_child(
         }
     };
     #[cfg(target_os = "linux")]
+    let cleanup_failed = cgroup.kill_and_remove().is_err();
+    #[cfg(target_os = "linux")]
     if let Ok(mut children) = known_children.lock() {
         children.remove(&Pid::from_raw(child.id() as i32));
     }
+    #[cfg(target_os = "linux")]
+    let (mut exit_code, mut signal) = status
+        .map(|value| (value.code(), signal_from_status(&value)))
+        .unwrap_or((None, None));
+    #[cfg(not(target_os = "linux"))]
     let (exit_code, signal) = status
         .map(|value| (value.code(), signal_from_status(&value)))
         .unwrap_or((None, None));
+    #[cfg(target_os = "linux")]
+    if cleanup_failed {
+        exit_code = Some(125);
+        signal = None;
+    }
     let reader_deadline = std::time::Instant::now() + Duration::from_secs(5);
     while readers_done.load(Ordering::Acquire) < reader_count
         && std::time::Instant::now() < reader_deadline
@@ -249,19 +266,11 @@ fn now_ms() -> u64 {
 }
 
 pub(super) trait CommandIdentity {
-    fn uid(&mut self, uid: u32) -> &mut Self;
-    fn gid(&mut self, gid: u32) -> &mut Self;
     fn process_group(&mut self, pgid: i32) -> &mut Self;
 }
 
 #[cfg(unix)]
 impl CommandIdentity for Command {
-    fn uid(&mut self, uid: u32) -> &mut Self {
-        std::os::unix::process::CommandExt::uid(self, uid)
-    }
-    fn gid(&mut self, gid: u32) -> &mut Self {
-        std::os::unix::process::CommandExt::gid(self, gid)
-    }
     fn process_group(&mut self, pgid: i32) -> &mut Self {
         std::os::unix::process::CommandExt::process_group(self, pgid)
     }

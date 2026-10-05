@@ -72,6 +72,8 @@ pub enum NetworkMode {
 pub struct Volume {
     pub id: VolumeId,
     pub catalog_key: String,
+    #[serde(default)]
+    pub backing: Option<crate::VolumeBacking>,
     pub read_only: bool,
     pub guest_mount_point: String,
     pub filesystem: String,

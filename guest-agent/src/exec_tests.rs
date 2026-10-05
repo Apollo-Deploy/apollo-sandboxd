@@ -16,6 +16,10 @@ fn spec(id: &str, argv: Vec<String>) -> ExecutionSpec {
             .into_owned(),
         uid: metadata.uid(),
         gid: metadata.gid(),
+        supplementary_groups: Vec::new(),
+        readonly_root: false,
+                mounts: Vec::new(),
+        max_processes: 64,
         environment: Default::default(),
         secret_environment: Default::default(),
         pty: None,
@@ -23,10 +27,12 @@ fn spec(id: &str, argv: Vec<String>) -> ExecutionSpec {
         timeout_ms: 2_000,
         detached: false,
         output_policy: OutputPolicy::Disabled,
+        output_bytes: 0,
     }
 }
 
 #[test]
+#[ignore = "requires guest bootstrap (cgroup and PID namespace); exercised by native Firecracker qualification"]
 fn exact_argv_and_raw_output_are_preserved() {
     let (sender, receiver) = sync_channel(32);
     let mut manager = Manager::new(sender);
@@ -53,6 +59,7 @@ fn exact_argv_and_raw_output_are_preserved() {
 }
 
 #[test]
+#[ignore = "requires guest bootstrap (cgroup and PID namespace); exercised by native Firecracker qualification"]
 fn timeout_terminates_long_running_child() {
     let (sender, receiver) = sync_channel(32);
     let mut manager = Manager::new(sender);
@@ -79,6 +86,7 @@ fn timeout_terminates_long_running_child() {
 
 #[cfg(target_os = "linux")]
 #[test]
+#[ignore = "requires guest bootstrap (cgroup and PID namespace); exercised by native Firecracker qualification"]
 fn pty_child_has_a_controlling_terminal() {
     let (sender, receiver) = sync_channel(32);
     let mut manager = Manager::new(sender);
@@ -111,6 +119,7 @@ fn pty_child_has_a_controlling_terminal() {
 }
 
 #[test]
+#[ignore = "requires guest bootstrap (cgroup and PID namespace); exercised by native Firecracker qualification"]
 fn completed_exec_id_cannot_be_reused() {
     let (sender, receiver) = sync_channel(32);
     let mut manager = Manager::new(sender);
@@ -134,6 +143,7 @@ fn completed_exec_id_cannot_be_reused() {
 }
 
 #[test]
+#[ignore = "requires guest bootstrap (cgroup and PID namespace); exercised by native Firecracker qualification"]
 fn completed_exec_can_be_explicitly_retired() {
     let (sender, receiver) = sync_channel(32);
     let mut manager = Manager::new(sender);

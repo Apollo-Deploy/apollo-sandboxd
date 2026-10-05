@@ -368,9 +368,14 @@ mod tests {
             device: metadata.dev(),
             inode: metadata.ino(),
         };
-        drop(original);
         std::fs::remove_file(&path).expect("remove original fixture");
         let replacement = UnixListener::bind(&path).expect("replacement socket");
+        let replacement_metadata = std::fs::symlink_metadata(&path).expect("replacement metadata");
+        assert_ne!(
+            (metadata.dev(), metadata.ino()),
+            (replacement_metadata.dev(), replacement_metadata.ino()),
+            "replacement must have a distinct inode identity"
+        );
 
         let result =
             crate::session::cleanup_paths::remove_socket(&path, Some(identity), &assets(&root));

@@ -8,6 +8,7 @@ pub mod files;
 pub mod guest;
 pub mod identity;
 pub mod image;
+pub mod operation;
 pub mod request;
 pub mod spec;
 pub mod state;
@@ -17,13 +18,17 @@ pub use error::{ApiError, ErrorCode};
 pub use guest::*;
 pub use identity::*;
 pub use image::*;
+pub use operation::*;
 pub use request::*;
 pub use spec::*;
 pub use state::*;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 pub const MAX_DATA_BYTES: usize = 65_536;
 
 mod snapshot;
 pub use snapshot::{SnapshotCommand, SnapshotInfo, SnapshotSecretPolicy};
+
+mod volume;
+pub use volume::*;

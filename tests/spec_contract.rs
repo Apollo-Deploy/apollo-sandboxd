@@ -79,6 +79,7 @@ fn resource_and_volume_descriptors_have_finite_safe_bounds() {
         sandbox.volumes.push(Volume {
             id: VolumeId::new("volume").expect("id"),
             catalog_key: "trusted".into(),
+            backing: None,
             read_only: true,
             guest_mount_point: mount.into(),
             filesystem: "ext4".into(),

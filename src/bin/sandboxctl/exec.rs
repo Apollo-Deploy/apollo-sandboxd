@@ -62,6 +62,8 @@ pub struct Start {
     uid: u32,
     #[arg(long, default_value_t = 0)]
     gid: u32,
+    #[arg(long)]
+    max_processes: u32,
     #[arg(long, default_value_t = 3_600_000)]
     timeout_ms: u32,
     #[arg(long)]
@@ -165,6 +167,10 @@ pub async fn run(socket: &Path, target: Target, command: ExecCommand) -> Result<
                 cwd: start.cwd,
                 uid: start.uid,
                 gid: start.gid,
+                supplementary_groups: Vec::new(),
+                readonly_root: false,
+                mounts: Vec::new(),
+                max_processes: start.max_processes,
                 environment,
                 secret_environment: BTreeMap::new(),
                 pty: start.pty.then_some(TerminalSize {
@@ -182,6 +188,11 @@ pub async fn run(socket: &Path, target: Target, command: ExecCommand) -> Result<
                     OutputPolicy::Required
                 } else {
                     OutputPolicy::Disabled
+                },
+                output_bytes: if start.stdout_sink.is_some() {
+                    256 << 20
+                } else {
+                    0
                 },
             };
             let mut sinks = Vec::new();

@@ -140,7 +140,7 @@ async fn oversized_frame_is_rejected_before_body_allocation() {
         let (_, hello) = read_frame(&mut stream).await;
         let mut header = [0; 20];
         header[..4].copy_from_slice(b"ASD\0");
-        header[4..6].copy_from_slice(&1u16.to_be_bytes());
+        header[4..6].copy_from_slice(&sandboxd_protocol::PROTOCOL_VERSION.to_be_bytes());
         header[8..12]
             .copy_from_slice(&((guest_protocol::wire::MAX_FRAME_BYTES + 1) as u32).to_be_bytes());
         header[12..20].copy_from_slice(&hello.operation.as_str().len().to_be_bytes());

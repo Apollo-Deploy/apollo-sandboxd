@@ -7,11 +7,14 @@ mod events;
 pub(crate) mod guest_operation;
 #[cfg(test)]
 mod guest_operation_tests;
+#[cfg(target_os = "linux")]
+pub(crate) use image::ArtifactdImageHandoff;
 pub(crate) use image::PreparedImageRecord;
 mod image;
 mod lease;
 mod migration;
 mod mutation;
+mod operation_receipt;
 mod policy;
 mod prelaunch;
 mod record;
@@ -51,3 +54,7 @@ mod snapshot_restore;
 
 #[cfg(test)]
 mod snapshot_tests;
+
+mod volume;
+mod volume_release;
+pub(crate) use volume::DynamicVolumeRecord;

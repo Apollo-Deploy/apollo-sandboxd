@@ -43,7 +43,7 @@ fn transport_restore_preserves_actual_lost_guest_sequence_range() {
     let journal = OutputJournal::open(&path, exec.clone(), 1 << 20).unwrap();
     let router = ExecEventRouter::new(&root).unwrap();
     router
-        .register(exec.clone(), journal, None, None, OutputPolicy::Disabled)
+        .register(exec.clone(), journal, None, None, OutputPolicy::Disabled, 0)
         .unwrap();
     router
         .handle(GuestPeer {
@@ -80,7 +80,8 @@ fn transport_restore_preserves_actual_lost_guest_sequence_range() {
 fn transport_restore_terminal_required_output_needs_no_live_descriptors() {
     let (_temp, root, exec) = fixture();
     let path = root.join(exec.as_str());
-    ExecEventRouter::prepare_manifest(&path, &exec, [7; 32], OutputPolicy::Required).unwrap();
+    ExecEventRouter::prepare_manifest(&path, &exec, [7; 32], OutputPolicy::Required, 1 << 20)
+        .unwrap();
     let journal = OutputJournal::open(&path, exec.clone(), 1 << 20).unwrap();
     drop(journal);
     let bytes = sandboxd_protocol::codec::encode_body(

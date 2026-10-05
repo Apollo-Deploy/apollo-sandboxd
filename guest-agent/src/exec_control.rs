@@ -67,11 +67,21 @@ impl Manager {
         if !process.alive.load(Ordering::Acquire) {
             return Err("exec already exited".into());
         }
-        killpg(
-            Pid::from_raw(i32::try_from(process.pid).map_err(|_| "pid out of range")?),
-            Signal::SIGTERM,
-        )
-        .map_err(|e| format!("exec cancel failed: {e}"))
+        #[cfg(target_os = "linux")]
+        {
+            process
+                .cgroup
+                .kill()
+                .map_err(|e| format!("exec cancellation failed: {e}"))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            killpg(
+                Pid::from_raw(i32::try_from(process.pid).map_err(|_| "pid out of range")?),
+                Signal::SIGTERM,
+            )
+            .map_err(|e| format!("exec cancel failed: {e}"))
+        }
     }
 
     #[allow(unsafe_code)]

@@ -12,6 +12,8 @@ use std::collections::VecDeque;
 use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, OwnedFd};
+#[cfg(not(target_os = "linux"))]
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{
@@ -39,6 +41,8 @@ pub(crate) struct Process {
     pub(crate) detached: bool,
     #[cfg(target_os = "linux")]
     pty: Option<OwnedFd>,
+    #[cfg(target_os = "linux")]
+    cgroup: crate::exec_cgroup::ExecCgroup,
 }
 
 struct StdinRequest {
@@ -117,17 +121,46 @@ impl Manager {
         if self.completed.len() >= MAX_EXECUTIONS {
             return Err("completed exec receipt capacity exhausted".into());
         }
+        #[cfg(target_os = "linux")]
+        let cgroup = crate::exec_cgroup::ExecCgroup::create(spec.id.as_str(), spec.max_processes)?;
+        #[cfg(target_os = "linux")]
+        let placement = cgroup.placement_file()?;
+        #[cfg(target_os = "linux")]
+        let executable = std::fs::File::open("/proc/self/exe")
+            .map_err(|e| format!("open trusted guest executable: {e}"))?;
+        #[cfg(target_os = "linux")]
+        let executable_fd = executable.as_raw_fd();
+        #[cfg(target_os = "linux")]
+        crate::exec_isolation::set_cloexec(executable_fd, false)?;
+        #[cfg(target_os = "linux")]
+        let mut command = Command::new(format!("/proc/self/fd/{executable_fd}"));
+        #[cfg(not(target_os = "linux"))]
         let mut command = Command::new(&spec.argv[0]);
+        #[cfg(not(target_os = "linux"))]
         command
             .args(&spec.argv[1..])
             .current_dir(&spec.cwd)
             .uid(spec.uid)
             .gid(spec.gid);
         if spec.pty.is_none() {
-            command.process_group(0);
+            CommandIdentity::process_group(&mut command, 0);
         }
+        #[cfg(target_os = "linux")]
+        let (mut spec_writer, spec_child, mut encoded_spec, volume_files) =
+            crate::exec_isolation::configure_launcher(&mut command, &spec, executable_fd)?;
+        #[cfg(target_os = "linux")]
+        crate::exec_isolation::install_placement_hook(
+            &mut command,
+            spec_child.as_raw_fd(),
+            &placement,
+        );
+        #[cfg(target_os = "linux")]
         command.env_clear();
+        #[cfg(not(target_os = "linux"))]
+        command.env_clear();
+        #[cfg(not(target_os = "linux"))]
         command.envs(&spec.environment);
+        #[cfg(not(target_os = "linux"))]
         for (key, value) in &spec.secret_environment {
             command.env(key, &value.0);
         }
@@ -175,6 +208,30 @@ impl Manager {
             .spawn()
             .map_err(|e| format!("exec spawn failed: {e}"))?;
         let pid = child.id();
+        #[cfg(target_os = "linux")]
+        {
+            drop(spec_child);
+            drop(volume_files);
+            let setup = (|| {
+                if !cgroup.contains(pid)? {
+                    return Err("trusted launcher did not enter its execution cgroup".into());
+                }
+                spec_writer
+                    .write_all(&encoded_spec)
+                    .map_err(|e| format!("send execution spec to trusted launcher: {e}"))?;
+                spec_writer
+                    .shutdown(std::net::Shutdown::Write)
+                    .map_err(|e| format!("close trusted launcher spec channel: {e}"))?;
+                Ok::<(), String>(())
+            })();
+            encoded_spec.fill(0);
+            if let Err(error) = setup {
+                let _ = cgroup.kill();
+                let _ = child.wait();
+                let _ = cgroup.kill_and_remove();
+                return Err(error);
+            }
+        }
         #[cfg(target_os = "linux")]
         if let Ok(mut children) = self.known_children.lock() {
             children.insert(nix::unistd::Pid::from_raw(pid as i32));
@@ -281,6 +338,8 @@ impl Manager {
         let waiter_output = output.clone();
         #[cfg(target_os = "linux")]
         let waiter_children = self.known_children.clone();
+        #[cfg(target_os = "linux")]
+        let waiter_cgroup = cgroup.clone();
         let child_slot = Arc::new(Mutex::new(Some(child)));
         let waiter_child = child_slot.clone();
         let waiter = thread::Builder::new()
@@ -298,6 +357,8 @@ impl Manager {
                         reader_count,
                         waiter_alive,
                         waiter_lifecycle,
+                        #[cfg(target_os = "linux")]
+                        waiter_cgroup,
                         #[cfg(target_os = "linux")]
                         waiter_children,
                     );
@@ -323,6 +384,8 @@ impl Manager {
                 detached: spec.detached,
                 #[cfg(target_os = "linux")]
                 pty: pty_control,
+                #[cfg(target_os = "linux")]
+                cgroup,
             },
         );
         Ok(())

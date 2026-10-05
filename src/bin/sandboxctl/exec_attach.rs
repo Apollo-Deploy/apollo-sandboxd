@@ -112,7 +112,7 @@ async fn status(calls: &mut Calls<'_>, exec: &ExecId) -> Result<ExecSummary> {
                 limit: 256,
             })
             .await?;
-        let GuestReply::ExecList(entries) = reply else {
+        let GuestReply::ExecList { entries } = reply else {
             return Err(Error::State);
         };
         let next = entries.last().map(|entry| entry.exec.clone());

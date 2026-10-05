@@ -77,6 +77,21 @@ fn fixture() -> (tempfile::TempDir, LaunchManifest, String) {
     (dir, manifest, digest)
 }
 
+fn arm_sysfs(root: &std::path::Path) {
+    let cache = root.join("sys/devices/system/cpu/cpu0/cache/index0");
+    fs::create_dir_all(&cache).expect("ARM cache sysfs");
+    for (name, value) in [
+        ("level", "1\n"),
+        ("type", "Data\n"),
+        ("shared_cpu_map", "0\n"),
+    ] {
+        fs::write(cache.join(name), value).expect("ARM cache attribute");
+    }
+    let registers = root.join("sys/devices/system/cpu/cpu0/regs/identification");
+    fs::create_dir_all(&registers).expect("ARM CPU register sysfs");
+    fs::write(registers.join("midr_el1"), "0x410fd0c0\n").expect("ARM MIDR attribute");
+}
+
 #[test]
 fn captures_and_removes_allowlisted_jailer_tree() {
     let (dir, manifest, digest) = fixture();
@@ -105,8 +120,18 @@ fn replacement_binary_is_rejected_and_preserved() {
     let gid = rustix::process::getegid().as_raw();
     let tree = jail_tree::capture(&manifest, uid, gid, &digest).expect("capture");
     let path = manifest.jail_root.join("firecracker");
+    // Preserve the original inode while replacing the pathname; ext4 may
+    // otherwise reuse its inode number immediately after unlink.
+    let original = fs::File::open(&path).expect("open original binary");
     fs::remove_file(&path).expect("owned binary");
     fs::write(&path, b"foreign").expect("replacement");
+    let original_identity = original.metadata().expect("original identity");
+    let replacement_identity = fs::symlink_metadata(&path).expect("replacement identity");
+    assert_ne!(
+        (original_identity.dev(), original_identity.ino()),
+        (replacement_identity.dev(), replacement_identity.ino()),
+        "replacement must have a distinct inode identity"
+    );
     assert!(jail_tree::remove(&manifest, &tree).is_err());
     assert_eq!(fs::read(path).expect("preserved"), b"foreign");
 }
@@ -136,8 +161,18 @@ fn replacement_directory_is_rejected_and_preserved() {
     let gid = rustix::process::getegid().as_raw();
     let tree = jail_tree::capture(&manifest, uid, gid, &digest).expect("capture");
     let path = manifest.jail_root.join("dev");
+    // Keep the removed directory inode referenced so the replacement has a
+    // distinct identity on filesystems that eagerly recycle inode numbers.
+    let original = fs::File::open(&path).expect("open original directory");
     fs::remove_dir_all(&path).expect("owned directory");
     fs::create_dir(&path).expect("replacement");
+    let original_identity = original.metadata().expect("original identity");
+    let replacement_identity = fs::symlink_metadata(&path).expect("replacement identity");
+    assert_ne!(
+        (original_identity.dev(), original_identity.ino()),
+        (replacement_identity.dev(), replacement_identity.ino()),
+        "replacement must have a distinct inode identity"
+    );
     assert!(jail_tree::remove(&manifest, &tree).is_err());
     assert!(path.is_dir());
 }
@@ -159,4 +194,79 @@ fn malformed_entry_path_is_rejected() {
         links: 1,
     });
     assert!(jail_tree::remove(&manifest, &tree).is_err());
+}
+
+#[test]
+fn captures_and_removes_bounded_arm_sysfs_mirror() {
+    let (dir, manifest, digest) = fixture();
+    arm_sysfs(&manifest.jail_root);
+    let uid = rustix::process::geteuid().as_raw();
+    let gid = rustix::process::getegid().as_raw();
+    let tree = jail_tree::capture(&manifest, uid, gid, &digest).expect("capture ARM sysfs");
+    assert!(tree.entries.iter().any(|entry| {
+        entry.relative
+            == PathBuf::from("root/sys/devices/system/cpu/cpu0/regs/identification/midr_el1")
+    }));
+    jail_tree::remove(&manifest, &tree).expect("remove ARM sysfs");
+    assert!(!manifest.jail_root.join("sys").exists());
+    assert!(dir.path().join("firecracker/session/root").exists());
+}
+
+#[test]
+fn unexpected_arm_sysfs_entry_is_preserved_and_blocks_removal() {
+    let (_dir, manifest, digest) = fixture();
+    arm_sysfs(&manifest.jail_root);
+    let uid = rustix::process::geteuid().as_raw();
+    let gid = rustix::process::getegid().as_raw();
+    let tree = jail_tree::capture(&manifest, uid, gid, &digest).expect("capture ARM sysfs");
+    let foreign = manifest
+        .jail_root
+        .join("sys/devices/system/cpu/cpu0/cache/index0/foreign");
+    fs::write(&foreign, b"preserve").expect("foreign sysfs entry");
+    assert!(jail_tree::remove(&manifest, &tree).is_err());
+    assert_eq!(
+        fs::read(foreign).expect("preserved foreign entry"),
+        b"preserve"
+    );
+}
+
+#[test]
+fn arm_sysfs_symlink_is_rejected_and_preserved() {
+    let (_dir, manifest, digest) = fixture();
+    arm_sysfs(&manifest.jail_root);
+    let target = manifest.jail_root.join("sysfs-target");
+    fs::write(&target, b"foreign target").expect("sysfs symlink target");
+    let level = manifest
+        .jail_root
+        .join("sys/devices/system/cpu/cpu0/cache/index0/level");
+    fs::remove_file(&level).expect("remove original cache attribute");
+    std::os::unix::fs::symlink(&target, &level).expect("replace with sysfs symlink");
+    let uid = rustix::process::geteuid().as_raw();
+    let gid = rustix::process::getegid().as_raw();
+    assert!(jail_tree::capture(&manifest, uid, gid, &digest).is_err());
+    assert_eq!(
+        fs::read(target).expect("preserved target"),
+        b"foreign target"
+    );
+    assert!(
+        fs::symlink_metadata(level)
+            .expect("preserved symlink")
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn unknown_arm_sysfs_entry_is_rejected_and_preserved() {
+    let (_dir, manifest, digest) = fixture();
+    arm_sysfs(&manifest.jail_root);
+    let foreign = manifest.jail_root.join("sys/foreign");
+    fs::write(&foreign, b"preserve").expect("unknown sysfs entry");
+    let uid = rustix::process::geteuid().as_raw();
+    let gid = rustix::process::getegid().as_raw();
+    assert!(jail_tree::capture(&manifest, uid, gid, &digest).is_err());
+    assert_eq!(
+        fs::read(foreign).expect("preserved unknown entry"),
+        b"preserve"
+    );
 }

@@ -1,4 +1,4 @@
-//! Real x86_64 Firecracker qualification.
+//! Real host-native Firecracker qualification.
 //!
 //! This ignored test is run by the bounded native qualification runner as root
 //! on the pinned Linux host. Once explicitly selected, every missing input is
@@ -9,7 +9,7 @@ use apollo_sandboxd::{
     jailer::{CgroupLimits, CgroupV2, JailInputs, JailStage},
     runtime::{VerifiedCatalogs, verify},
     session::{AssetInputs, BootInputs, LaunchInputs, boot, stop_and_cleanup},
-    state::{SessionPreparation, Store, StoreLaunchJournal},
+    state::{SessionControlContext, SessionPreparation, Store, StoreLaunchJournal},
     storage::{DriveFactory, DriveOwner},
 };
 use guest_protocol::{
@@ -21,9 +21,17 @@ use std::{
     env, fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
+#[path = "native_boot_contract/exec_contract.rs"]
+mod exec_contract;
+#[path = "native_boot_contract/exec_edges.rs"]
+mod exec_edges;
+#[path = "native_boot_contract/filesystem_contract.rs"]
+mod filesystem_contract;
+#[path = "native_boot_contract/process_contract.rs"]
+mod process_contract;
 fn required(name: &str) -> PathBuf {
     let value = env::var_os(name).unwrap_or_else(|| panic!("{name} is required"));
     let path = PathBuf::from(value);
@@ -60,11 +68,16 @@ fn resource() -> Resources {
 }
 
 fn spec(image: ImageDigest) -> SandboxSpec {
+    let (architecture, kernel_profile, runtime_profile) = match std::env::consts::ARCH {
+        "x86_64" => (Architecture::X86_64, "firecracker-ci-x86", "fc-1-17-x86"),
+        "aarch64" => (Architecture::Aarch64, "apollo-linux-arm64", "fc-1-17-arm64"),
+        other => panic!("unsupported native qualification architecture: {other}"),
+    };
     SandboxSpec {
-        architecture: Architecture::X86_64,
+        architecture,
         image,
-        kernel_profile: "amazonlinux-microvm-x86".into(),
-        runtime_profile: "fc-1-17-x86".into(),
+        kernel_profile: kernel_profile.into(),
+        runtime_profile: runtime_profile.into(),
         persistence: Persistence::FilesystemPersistent,
         resources: resource(),
         network: NetworkMode::None,
@@ -109,7 +122,7 @@ impl Drop for KillVmmOnUnwind<'_> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "native Linux/KVM qualification; requires the pinned host assets and root privileges"]
-async fn native_x86_firecracker_boot_exec_file_and_pty() {
+async fn native_firecracker_boot_exec_process_limit_file_and_pty() {
     let config_path = required("APOLLO_NATIVE_CONFIG");
     let operator_root = required("APOLLO_NATIVE_OPERATOR_ROOT");
     let cgroup_parent = required("APOLLO_NATIVE_CGROUP_PARENT");
@@ -295,7 +308,10 @@ async fn native_x86_firecracker_boot_exec_file_and_pty() {
                 network_namespace_root: None,
                 api_socket: PathBuf::from("/run/firecracker.socket"),
                 vsock_socket: PathBuf::from("/run/vsock.socket"),
-                boot_args: "console=ttyS0 reboot=k panic=1 pci=off",
+                boot_args: match intent.pins.architecture {
+                    Architecture::X86_64 => "console=ttyS0 reboot=k panic=1 pci=off",
+                    Architecture::Aarch64 => "console=ttyS0 reboot=k panic=1",
+                },
                 timeout: Duration::from_secs(90),
             },
             expected_guest: expected_guest.clone(),
@@ -342,48 +358,8 @@ async fn native_x86_firecracker_boot_exec_file_and_pty() {
     };
     let _kill_on_unwind = KillVmmOnUnwind(&result.launch.process);
     let guest = &result.guest;
-    let exec = ExecId::new("native-exec").unwrap();
-    let ready = guest
-        .request(
-            OperationId::new("native-exec-start").unwrap(),
-            GuestMessage::ExecStart {
-                spec: Box::new(ExecutionSpec {
-                    id: exec.clone(),
-                    argv: vec!["/bin/sh".into(), "-c".into(), "printf native-exec".into()],
-                    use_image_defaults: false,
-                    cwd: "/".into(),
-                    uid: 0,
-                    gid: 0,
-                    environment: BTreeMap::new(),
-                    secret_environment: BTreeMap::new(),
-                    pty: None,
-                    stdin: StdinMode::Closed,
-                    timeout_ms: 10_000,
-                    detached: false,
-                    output_policy: OutputPolicy::Required,
-                }),
-            },
-        )
-        .await
-        .expect("guest exec request");
-    assert!(matches!(ready.message, GuestMessage::Ready));
-    let mut output = Vec::new();
-    loop {
-        match guest
-            .receive(Duration::from_secs(10))
-            .await
-            .expect("exec event")
-        {
-            peer if matches!(peer.message, GuestMessage::Output { .. }) => {
-                if let GuestMessage::Output { record } = peer.message {
-                    output.extend(record.payload);
-                }
-            }
-            peer if matches!(peer.message, GuestMessage::ExecExit { .. }) => break,
-            _ => {}
-        }
-    }
-    assert_eq!(output, b"native-exec");
+    exec_contract::run(guest).await;
+    process_contract::run(guest).await;
     let write = guest
         .request(
             OperationId::new("native-file-write").unwrap(),
@@ -419,57 +395,47 @@ async fn native_x86_firecracker_boot_exec_file_and_pty() {
         GuestMessage::FileResult { data, .. } => assert_eq!(data, b"persistent-state"),
         other => panic!("unexpected file response: {other:?}"),
     }
-    let pty = ExecId::new("native-pty").unwrap();
-    guest
-        .request(
-            OperationId::new("native-pty-start").unwrap(),
-            GuestMessage::ExecStart {
-                spec: Box::new(ExecutionSpec {
-                    id: pty,
-                    argv: vec!["/bin/sh".into(), "-c".into(), "printf native-pty".into()],
-                    use_image_defaults: false,
-                    cwd: "/".into(),
-                    uid: 0,
-                    gid: 0,
-                    environment: BTreeMap::new(),
-                    secret_environment: BTreeMap::new(),
-                    pty: Some(TerminalSize {
-                        rows: 24,
-                        columns: 80,
-                    }),
-                    stdin: StdinMode::Closed,
-                    timeout_ms: 10_000,
-                    detached: false,
-                    output_policy: OutputPolicy::Required,
-                }),
+    exec_edges::run(guest).await;
+    filesystem_contract::run(guest).await;
+    let running_record = store
+        .inspect(owner, &journal_key.sandbox)
+        .expect("inspect running sandbox before stop");
+    let stop_fence = Fence {
+        sandbox: running_record.id.clone(),
+        generation: running_record.generation,
+        session_generation: running_record
+            .session
+            .as_ref()
+            .map(|session| session.generation),
+        lease: running_record.lease.id.clone(),
+    };
+    let stop_sequence = store
+        .operation_watermark(owner)
+        .expect("read operation sequence watermark")
+        .checked_add(1)
+        .expect("next operation sequence");
+    let stop_operation = OperationId::with_sequence(stop_sequence, "native-final-stop")
+        .expect("sequence-bound stop operation");
+    let host_boot_id = boot_id();
+    let stop_admission = store
+        .begin_session_control_sequenced(
+            owner,
+            &stop_operation,
+            &stop_fence,
+            SessionControl::Stop,
+            SessionControlContext {
+                pins: None,
+                pools: &config.identities,
+                host_boot_id: &host_boot_id,
+                now_ms: now_ms(),
             },
+            Some(stop_sequence),
         )
-        .await
-        .expect("guest PTY start");
-    let mut pty_output = Vec::new();
-    loop {
-        match guest
-            .receive(Duration::from_secs(10))
-            .await
-            .expect("PTY event")
-            .message
-        {
-            GuestMessage::Output { record } => pty_output.extend(record.payload),
-            GuestMessage::ExecExit {
-                exit_code,
-                signal,
-                timed_out,
-                ..
-            } => {
-                assert_eq!(exit_code, Some(0));
-                assert_eq!(signal, None);
-                assert!(!timed_out);
-                break;
-            }
-            _ => {}
-        }
-    }
-    assert!(String::from_utf8_lossy(&pty_output).contains("native-pty"));
+        .expect("durably admit final session stop");
+    assert!(matches!(
+        stop_admission.response,
+        Response::Sandbox(sandbox) if sandbox.state == SandboxState::Stopping
+    ));
     guest
         .request(
             OperationId::new("native-shutdown").unwrap(),

@@ -30,6 +30,14 @@ impl RuntimeService {
             };
             // The original pidfd remains valid after death, allowing partial cleanup retries.
             let proof = crate::session::stop_and_cleanup(&vm.process, &vm.manifest, key).await?;
+            {
+                let mut locks = vm.volume_locks.lock().map_err(|_| Error::State)?;
+                self.authority
+                    .restore_dynamic_owners(&vm.intent.pins, Some(&locks))?;
+                // Guest event tasks may retain LiveVm after removal from the live map.
+                // Release backing locks only after verified death and ownership restoration.
+                locks.clear();
+            }
             let key = key.clone();
             self.state
                 .with_store(move |store| store.record_session_stopped(uid, &key, proof, now_ms()?))

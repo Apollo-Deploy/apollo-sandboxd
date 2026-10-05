@@ -12,10 +12,10 @@ pub(super) fn validate_existing(
     command: &GuestCommand,
     digest: [u8; 32],
 ) -> Result<()> {
-    if matches!(command, GuestCommand::ExecStart { .. })
-        && !ExecEventRouter::manifest_matches(root, exec, digest)?
-    {
-        return Err(Error::State);
+    if let GuestCommand::ExecStart { spec } = command {
+        if !ExecEventRouter::manifest_matches(root, exec, digest, spec.output_bytes)? {
+            return Err(Error::State);
+        }
     }
     Ok(())
 }
@@ -35,6 +35,10 @@ mod tests {
                 cwd: "/".into(),
                 uid: 0,
                 gid: 0,
+                supplementary_groups: Vec::new(),
+                readonly_root: false,
+                mounts: Vec::new(),
+                max_processes: 64,
                 environment: Default::default(),
                 secret_environment: Default::default(),
                 pty: None,
@@ -42,6 +46,7 @@ mod tests {
                 timeout_ms: 60000,
                 detached: true,
                 output_policy: OutputPolicy::Disabled,
+                output_bytes: 0,
             }),
         };
         let start_digest = [1; 32];
@@ -51,6 +56,7 @@ mod tests {
             &exec,
             start_digest,
             OutputPolicy::Disabled,
+            0,
         )
         .unwrap();
         validate_existing(directory.path(), &exec, &command, start_digest).unwrap();

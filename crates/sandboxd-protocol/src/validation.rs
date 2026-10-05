@@ -129,7 +129,10 @@ pub fn volumes(volumes: &[Volume]) -> Result<(), ApiError> {
         let path = &volume.guest_mount_point;
         if !ids.insert(volume.id.as_str())
             || !mounts.insert(path)
-            || SandboxId::new(&volume.catalog_key).is_err()
+            || match &volume.backing {
+ Some(backing) => !volume.catalog_key.is_empty() || !backing.validate() || volume.filesystem != "ext4",
+ None => SandboxId::new(&volume.catalog_key).is_err(),
+ }
             || !rate(&volume.rate_limiter)
             || path.len() > 4096
             || !path.starts_with('/')

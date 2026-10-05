@@ -102,7 +102,13 @@ fn observe_parent_mounts(assets: &AssetsManifest) -> Result<(super::AssetIdentit
         };
         let path = PathBuf::from(format!("/proc/self/fd/{root_fd}/{name}"));
         let mount_id = super::asset_mount::observed_id(&path)?;
-        validate_mount_observation(asset, observed, stat.st_nlink, mount_id, root_mount_id)?;
+        validate_mount_observation(
+            asset,
+            observed,
+            u64::from(stat.st_nlink),
+            mount_id,
+            root_mount_id,
+        )?;
         super::asset_mount::require_private(mount_id).map_err(|_| {
             Error::Config("shared legacy asset mount requires explicit administrative cleanup")
         })?;
@@ -206,7 +212,13 @@ fn reveal_placeholders(assets: &AssetsManifest) -> Result<AssetsManifest> {
         };
         let mount_path = PathBuf::from(format!("/proc/self/fd/{root_fd}/{name}"));
         let mount_id = super::asset_mount::observed_id(&mount_path)?;
-        validate_mount_observation(asset, observed, stat.st_nlink, mount_id, root_mount_id)?;
+        validate_mount_observation(
+            asset,
+            observed,
+            u64::from(stat.st_nlink),
+            mount_id,
+            root_mount_id,
+        )?;
         super::asset_mount::require_private(mount_id)?;
         observations.push((name.to_owned(), mount_path, mount_id));
     }

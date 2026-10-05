@@ -227,6 +227,7 @@ pub async fn launch(
         if let Err(error) = configure(
             &client,
             &ConfigureInputs {
+                architecture: input.intent.pins.architecture,
                 resources: &resources,
                 boot_args: &boot_args,
                 cid: input.intent.cid,
@@ -330,8 +331,15 @@ fn validate_input(input: &LaunchInputs<'_>) -> Result<()> {
     if input.intent.state != sandboxd_protocol::SessionState::JailerStarting {
         return Err(Error::Config("launch intent is not in a launch state"));
     }
-    if input.intent.pins.architecture != sandboxd_protocol::Architecture::X86_64 {
-        return Err(Error::Config("only x86_64 launch is enabled"));
+    let native_architecture = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some(sandboxd_protocol::Architecture::X86_64),
+        ("linux", "aarch64") => Some(sandboxd_protocol::Architecture::Aarch64),
+        _ => None,
+    };
+    if Some(input.intent.pins.architecture) != native_architecture {
+        return Err(Error::Config(
+            "launch architecture does not match native host",
+        ));
     }
     if input.timeout.is_zero() || input.timeout > Duration::from_secs(300) {
         return Err(Error::Config("invalid launch timeout"));

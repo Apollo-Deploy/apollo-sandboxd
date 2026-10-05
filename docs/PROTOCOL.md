@@ -1,9 +1,10 @@
 # Local administrative protocol
 
-The currently operational contract is administrative metadata only. It does not
-provide sandbox execution, guest control, file transfer, or passed output FDs.
+The API includes administrative metadata, fenced VM/guest operations, descriptor
+output sinks, prepared image handoff, and immutable filesystem export. Individual
+capabilities require native qualification; protocol support alone is not release approval.
 
-Frames use a 20-byte header: `ASD\0`, big-endian u16 version (1), zero u16 flags,
+Frames use a 20-byte header: `ASD\0`, big-endian u16 version (2), zero u16 flags,
 big-endian u32 body length, and big-endian u64 request ID. Body encoding is CBOR.
 One request and response use one Unix stream connection. Response request ID must
 match. Unknown version/flags, empty/oversized frames, trailing CBOR data, tags,
@@ -81,3 +82,51 @@ Guest protocol identities include sandbox/session generations, CID, protocol
 version, and a constant-time checked 32-byte boot nonce. Nonce and secret debug
 output is redacted and buffers use zeroization. These definitions do not deliver
 secrets, establish vsock, or supervise a guest.
+
+## Descriptor image import and filesystem export
+
+Protocol 2 requires an explicit execution `max_processes` policy; version 1
+clients fail framing validation instead of receiving silently weaker isolation.
+`ImageCommand::ImportPrepared` names an Artifactd prepared artifact, its
+manifest digest, producer-issued lease, and target architecture. Sandboxd
+persists its operation tokens and handoff phase before contacting Artifactd,
+receives a read-only prepared-rootfs directory descriptor, and owns ext4 image
+construction and publication. It releases the producer lease only after the
+prepared image is durable. Image preparation owns a bounded queue entry after
+admission. If the request deadline expires after dispatch, `ImagePending`
+identifies the durable operation; replay resumes the handoff without admitting
+a new identity. Registry access, archive intake, and OCI layer extraction are
+owned by Artifactd and are not sandboxd API operations.
+
+The current source inventory has no production orchestrator invoking
+`ImportPrepared`; `scripts/run_native_artifactd_handoff.py` is qualification
+orchestration only. The BuildKit publisher publishes through Artifactd, while
+Node's artifact application targets its separate MicroSandbox workload path.
+Neither is a sandboxd caller. Wiring a real prepared-rootfs producer to this
+consumer, including durable ownership and recovery of the producer-issued
+lease, remains an open integration gate.
+
+`FilesystemExport` carries an operation sequence, full session fence and byte/entry
+bounds. A successful response contains the OCI layer receipt and exactly one
+sealed output descriptor; errors and other responses contain no descriptors.
+The descriptor-aware client receives rights with the first frame bytes and rejects
+wrong descriptor counts. Native crash/restart, resource and guest isolation
+qualification remains required for this new export path.
+
+`operation_inspect` is a read-only query with `operation` and
+`operation_sequence`; the identity must encode the same positive sequence.
+The authenticated service UID selects the receipt partition. Its
+`operation_receipt` response includes those fields, `accepted_sequence`,
+`state`, `request_digest` and `response`. The optional digest is an opaque
+server-normalized SHA-256; it is not a client's semantic request digest.
+Inspection reads both operation tables and pending lifecycle links in one
+transaction and never admits, replays or transfers descriptors.
+
+States: `pending` retains an unresolved effect or lifecycle link; `complete`
+retains the operation response, which may be an error or acknowledgment rather
+than successful execution; `unavailable` has no retained receipt at or below the
+owner's watermark; `unknown` has no receipt above it. Missing states return null
+digest/response and do not authorize retry or intent replacement. A completed
+filesystem-export response is metadata only; its original descriptor must be
+reacquired through exact replay and independently checked. Duplicate IDs across
+operation journals fail closed as a storage error.

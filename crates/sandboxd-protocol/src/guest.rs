@@ -47,6 +47,13 @@ pub enum GuestCommand {
     File {
         request: FileRequest,
     },
+    /// Host-owned operation identity for a guest upper-layer filesystem export.
+    FilesystemExport {
+        #[serde(default)]
+        volume_id: Option<crate::VolumeId>,
+        max_bytes: u64,
+        max_entries: u32,
+    },
 }
 impl GuestCommand {
     pub fn validate(&self) -> Result<(), &'static str> {
@@ -78,6 +85,17 @@ impl GuestCommand {
                 Err("execution list bounds")
             }
             Self::File { request } => request.validate(),
+            Self::FilesystemExport {
+                volume_id: _,
+                max_bytes,
+                max_entries,
+            } if *max_bytes == 0
+                || *max_bytes > crate::MAX_FILESYSTEM_EXPORT_BYTES
+                || *max_entries == 0
+                || *max_entries > crate::MAX_FILESYSTEM_EXPORT_ENTRIES =>
+            {
+                Err("filesystem export bounds")
+            }
             _ => Ok(()),
         }
     }
@@ -87,6 +105,10 @@ impl GuestCommand {
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GuestReply {
     Acknowledged,
+    ExecStatus {
+        exec: ExecId,
+        exit: Option<ExecStatus>,
+    },
     ExecExit {
         exec: ExecId,
         exit_code: Option<i32>,
@@ -94,7 +116,9 @@ pub enum GuestReply {
         timed_out: bool,
     },
     ExecOutput(ExecOutputPage),
-    ExecList(Vec<ExecSummary>),
+    ExecList {
+        entries: Vec<ExecSummary>,
+    },
     File {
         #[serde(with = "serde_bytes")]
         data: Vec<u8>,
@@ -104,6 +128,14 @@ pub enum GuestReply {
         entries: Vec<DirectoryEntry>,
         link_target: Option<String>,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecStatus {
+    pub exit_code: Option<i32>,
+    pub signal: Option<u8>,
+    pub timed_out: bool,
 }
 
 impl GuestReply {
@@ -167,7 +199,7 @@ impl GuestReply {
             {
                 Err("execution output bounds")
             }
-            Self::ExecList(entries)
+            Self::ExecList { entries }
                 if entries.len() > 256
                     || entries.iter().any(|entry| {
                         entry.exec.as_str().is_empty()

@@ -35,6 +35,7 @@ impl RuntimeService {
                 })
                 .await
                 .map_err(|_| Error::State)??;
+                self.authority.restore_dynamic_owners(&intent.pins, None)?;
                 let key = key.clone();
                 self.state
                     .with_store(move |store| {
@@ -96,6 +97,7 @@ impl RuntimeService {
                         let process = process.as_ref().ok_or(Error::State)?;
                         crate::session::stop_and_cleanup(process, &manifest, key).await?
                     };
+                    self.authority.restore_dynamic_owners(&intent.pins, None)?;
                     let key = key.clone();
                     self.state
                         .with_store(move |store| {
@@ -245,10 +247,22 @@ mod tests {
             device: metadata.dev(),
             inode: metadata.ino(),
         };
+        // Keep the original inode alive while replacing its pathname so a
+        // filesystem cannot recycle the same device/inode pair for the test.
+        let original = std::fs::File::open(&jail).expect("open original jail");
         verify_jail_or_absent(&jail, identity).expect("matching jail");
         std::fs::remove_dir(&jail).expect("remove jail");
         verify_jail_or_absent(&jail, identity).expect("already removed jail");
         std::fs::create_dir(&jail).expect("replacement jail");
+        let replacement = std::fs::symlink_metadata(&jail).expect("replacement identity");
+        assert_ne!(
+            (replacement.dev(), replacement.ino()),
+            (
+                original.metadata().expect("original identity").dev(),
+                identity.inode
+            ),
+            "replacement must have a distinct inode identity"
+        );
         assert!(matches!(
             verify_jail_or_absent(&jail, identity),
             Err(Error::Path)

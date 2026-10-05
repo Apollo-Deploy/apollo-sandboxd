@@ -1,50 +1,44 @@
 //! Image administration never accepts an arbitrary host filename.
-use crate::{Architecture, ImageDigest, exec::SecretValue};
+use crate::{Architecture, ImageDigest};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ImageCommand {
-    Pull {
-        reference: String,
-        username: Option<String>,
-        password: Option<SecretValue>,
-    },
-    ImportLayout {
-        relative_layout: String,
+    ImportPrepared {
+        prepared_artifact_id: String,
+        manifest_digest: String,
+        lease_id: String,
+        architecture: Architecture,
     },
 }
 
 impl ImageCommand {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
-            Self::Pull {
-                reference,
-                username,
-                password,
+            Self::ImportPrepared {
+                prepared_artifact_id,
+                manifest_digest,
+                lease_id,
+                ..
             } => {
-                if reference.is_empty()
-                    || reference.len() > 512
-                    || reference.contains(['\0', '\n', '\r'])
-                    || username
-                        .as_ref()
-                        .is_some_and(|v| v.len() > 256 || v.contains('\0'))
-                    || username.is_some() != password.is_some()
-                    || password.as_ref().is_some_and(|v| v.0.len() > 4096)
+                if prepared_artifact_id.is_empty()
+                    || prepared_artifact_id.len() > 128
+                    || !prepared_artifact_id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                    || manifest_digest.len() != 71
+                    || !manifest_digest.starts_with("sha256:")
+                    || !manifest_digest[7..]
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+                    || lease_id.is_empty()
+                    || lease_id.len() > 128
+                    || !lease_id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
                 {
-                    return Err("image reference or credentials outside bounds");
-                }
-            }
-            Self::ImportLayout { relative_layout } => {
-                if relative_layout.is_empty()
-                    || relative_layout.len() > 1024
-                    || relative_layout.starts_with('/')
-                    || relative_layout
-                        .split('/')
-                        .any(|part| part.is_empty() || part == "." || part == "..")
-                    || relative_layout.contains('\0')
-                {
-                    return Err("image layout outside configured authority");
+                    return Err("prepared artifact identity outside bounds");
                 }
             }
         }

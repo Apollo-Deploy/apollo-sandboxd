@@ -19,12 +19,12 @@ fn output_snapshot_restores_prior_binary_journal_state() {
     fs::create_dir_all(&exec_root).expect("exec root");
     fs::set_permissions(&exec_root, fs::Permissions::from_mode(0o700)).expect("exec root mode");
     let digest = [3; 32];
-    ExecEventRouter::prepare_manifest(&exec_root, &exec, digest, OutputPolicy::Disabled)
+    ExecEventRouter::prepare_manifest(&exec_root, &exec, digest, OutputPolicy::Disabled, 0)
         .expect("manifest");
     let journal = OutputJournal::open(&exec_root, exec.clone(), 1 << 20).expect("journal");
     let router = ExecEventRouter::new(&source).expect("router");
     router
-        .register(exec.clone(), journal, None, None, OutputPolicy::Disabled)
+        .register(exec.clone(), journal, None, None, OutputPolicy::Disabled, 0)
         .expect("register");
     let output = |sequence, payload| GuestMessage::Output {
         record: OutputRecord {
@@ -87,12 +87,12 @@ fn output_snapshot_callback_failure_cleans_owned_partial_artifact() {
     fs::create_dir_all(&exec_root).expect("exec root");
     fs::set_permissions(&exec_root, fs::Permissions::from_mode(0o700)).expect("exec root mode");
     let digest = [3; 32];
-    ExecEventRouter::prepare_manifest(&exec_root, &exec, digest, OutputPolicy::Disabled)
+    ExecEventRouter::prepare_manifest(&exec_root, &exec, digest, OutputPolicy::Disabled, 0)
         .expect("manifest");
     let journal = OutputJournal::open(&exec_root, exec.clone(), 1 << 20).expect("journal");
     let router = ExecEventRouter::new(&source).expect("router");
     router
-        .register(exec, journal, None, None, OutputPolicy::Disabled)
+        .register(exec, journal, None, None, OutputPolicy::Disabled, 0)
         .expect("register");
     let snapshot_id = SnapshotId::new("partial").expect("snapshot id");
     let error = router

@@ -14,6 +14,8 @@ use std::{
 pub struct ExecOutputBridge {
     journals: HashMap<ExecId, OutputJournal>,
     sinks: HashMap<ExecId, (Option<OutputSink>, Option<OutputSink>)>,
+    output_limits: HashMap<ExecId, u64>,
+    output_bytes: HashMap<ExecId, u64>,
     root: PathBuf,
     losses: HashMap<ExecId, u64>,
     gaps: HashMap<ExecId, Vec<u64>>,
@@ -57,7 +59,7 @@ mod tests {
         let mut bridge = ExecOutputBridge::new(root.path()).expect("bridge");
         assert!(
             bridge
-                .register(exec, journal, None, None, OutputPolicy::Required)
+                .register(exec, journal, None, None, OutputPolicy::Required, 1 << 20)
                 .is_err()
         );
     }
@@ -87,6 +89,7 @@ mod tests {
                 Some(sink),
                 None,
                 OutputPolicy::BestEffort,
+                1 << 20,
             )
             .expect("best effort admission");
         bridge
@@ -122,6 +125,8 @@ impl ExecOutputBridge {
         Ok(Self {
             journals: HashMap::new(),
             sinks: HashMap::new(),
+            output_limits: HashMap::new(),
+            output_bytes: HashMap::new(),
             root: root.to_owned(),
             losses: HashMap::new(),
             gaps: HashMap::new(),
@@ -152,6 +157,7 @@ impl ExecOutputBridge {
         stdout: Option<OutputSink>,
         stderr: Option<OutputSink>,
         policy: OutputPolicy,
+        output_limit: u64,
     ) -> Result<()> {
         if matches!(policy, OutputPolicy::Required) && (stdout.is_none() || stderr.is_none()) {
             return Err(Error::Config("required output sink is missing"));
@@ -162,8 +168,14 @@ impl ExecOutputBridge {
         if self.journals.len() >= MAX_REGISTERED_EXECS {
             return Err(Error::Config("execution journal quota exhausted"));
         }
+        if output_limit > 1 << 30 || (matches!(policy, OutputPolicy::Required) && output_limit == 0)
+        {
+            return Err(Error::Config("invalid required output byte limit"));
+        }
         self.journals.insert(exec.clone(), journal);
-        self.sinks.insert(exec, (stdout, stderr));
+        self.sinks.insert(exec.clone(), (stdout, stderr));
+        self.output_limits.insert(exec.clone(), output_limit);
+        self.output_bytes.insert(exec, 0);
         Ok(())
     }
     pub(crate) fn register_completed(
@@ -175,7 +187,14 @@ impl ExecOutputBridge {
         timed_out: bool,
     ) -> Result<()> {
         // A terminal journal has no future delivery obligation or live sinks.
-        self.register(exec.clone(), journal, None, None, OutputPolicy::Disabled)?;
+        self.register(
+            exec.clone(),
+            journal,
+            None,
+            None,
+            OutputPolicy::Disabled,
+            256 << 20,
+        )?;
         self.restore_exit(&exec, exit_code, signal, timed_out)
     }
     pub fn handle(&mut self, message: GuestMessage) -> Result<()> {
@@ -223,6 +242,19 @@ impl ExecOutputBridge {
         if record.payload.len() > super::journal::MAX_PAYLOAD_BYTES as usize {
             return Err(Error::Config("guest output chunk exceeds bound"));
         }
+        let total = *self.output_bytes.get(&record.exec).ok_or(Error::State)?;
+        let limit = *self.output_limits.get(&record.exec).ok_or(Error::State)?;
+        let next = total
+            .checked_add(record.payload.len() as u64)
+            .ok_or(Error::State)?;
+        if next > limit {
+            self.sink_failures.push(record.exec.clone());
+            return Err(crate::error::Error::Api(sandboxd_protocol::ApiError::new(
+                sandboxd_protocol::ErrorCode::OutputSinkFailed,
+                "execution output byte limit exceeded",
+            )));
+        }
+        self.output_bytes.insert(record.exec.clone(), next);
         let journal = self.journals.get_mut(&record.exec).ok_or(Error::State)?;
         let expected = journal
             .high_watermark()?

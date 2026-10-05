@@ -28,6 +28,7 @@ description = "Standalone, fail-closed Firecracker sandbox control plane"
 
 [dependencies]
 sandboxd-protocol = { path = "crates/sandboxd-protocol" }
+artifactd-protocol = { path = "../apollo-artifactd/crates/artifactd-protocol" }
 firecracker-api = { path = "crates/firecracker-api" }
 guest-protocol = { path = "crates/guest-protocol" }
 serde.workspace = true
@@ -41,18 +42,15 @@ clap = { version = "4.5.51", features = ["derive"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 rustix = { version = "1.1.4", features = ["fs", "net", "process", "system", "event", "mount", "termios", "thread"] }
 getrandom = "0.2.16"
-reqwest = { version = "0.12.23", default-features = false, features = ["rustls-tls", "stream"] }
-flate2 = "1.1.5"
-tar = "0.4.44"
-xattr = "1.6.1"
-futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
 zeroize = "1.8.2"
 chacha20poly1305 = "0.10.1"
 nix = { version = "0.31.3", features = ["socket", "uio", "term"] }
 
-[dev-dependencies]
 tempfile = "3.23.0"
+
+[dev-dependencies]
 proptest = "1.9.0"
+tar = "0.4.44"
 
 [profile.release]
 lto = "thin"

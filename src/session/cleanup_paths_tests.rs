@@ -1,5 +1,10 @@
 use super::{AssetIdentity, AssetsManifest};
-use std::{fs, os::unix::fs::MetadataExt, path::Path};
+use std::{
+    env, fs,
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    path::Path,
+    process::Command,
+};
 
 fn identity(path: &Path) -> AssetIdentity {
     let meta = fs::symlink_metadata(path).unwrap();
@@ -7,6 +12,31 @@ fn identity(path: &Path) -> AssetIdentity {
         device: meta.dev(),
         inode: meta.ino(),
     }
+}
+
+const ISOLATED_NAMESPACE_ENV: &str = "APOLLO_SANDBOXD_CLEANUP_TEST_ISOLATED_NS";
+
+fn run_in_isolated_namespace(test_filter: &str) -> bool {
+    if env::var_os(ISOLATED_NAMESPACE_ENV).is_some() {
+        return false;
+    }
+    assert_eq!(rustix::process::geteuid().as_raw(), 0, "requires root");
+    let output = Command::new("/usr/bin/unshare")
+        .args(["--mount", "--propagation", "private", "--"])
+        .arg(std::env::current_exe().expect("test executable"))
+        .args(["--ignored", "--nocapture", "--test-threads=1"])
+        .arg(test_filter)
+        .env(ISOLATED_NAMESPACE_ENV, "1")
+        .output()
+        .expect("start isolated mount namespace; requires util-linux unshare");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains(test_filter),
+        "isolated test failed or did not run: {stdout}\n{stderr}"
+    );
+    println!("{stdout}");
+    true
 }
 
 fn fixture() -> (tempfile::TempDir, AssetsManifest) {
@@ -63,10 +93,41 @@ fn replacement_run_and_unknown_files_are_preserved() {
 
 #[test]
 #[cfg(target_os = "linux")]
+#[ignore = "native Linux asset cleanup; requires root, CAP_SYS_ADMIN, and util-linux"]
 fn detached_asset_placeholder_replays_but_replacement_is_rejected() {
-    let (_outer, mut assets) = fixture();
-    assets.mount_namespace_identity =
-        Some(super::asset_mount::current_namespace_identity().unwrap());
+    if run_in_isolated_namespace("detached_asset_placeholder_replays_but_replacement_is_rejected") {
+        return;
+    }
+    let outer = tempfile::tempdir().unwrap();
+    let anchor = outer.path().join("firecracker");
+    fs::create_dir(&anchor).unwrap();
+    fs::set_permissions(&anchor, fs::Permissions::from_mode(0o700)).unwrap();
+    rustix::mount::mount_bind_recursive(&anchor, &anchor).unwrap();
+    rustix::mount::mount_change(
+        &anchor,
+        rustix::mount::MountPropagationFlags::PRIVATE | rustix::mount::MountPropagationFlags::REC,
+    )
+    .unwrap();
+    let anchor_mount_id = super::asset_mount::ensure_private_anchor(&anchor).unwrap();
+    let session = anchor.join("session");
+    let root = session.join("root");
+    fs::create_dir_all(root.join("run")).unwrap();
+    for path in [&session, &root, &root.join("run")] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let root_mount_id = super::asset_mount::create_private_root(&root).unwrap();
+    assert_ne!(root_mount_id, anchor_mount_id);
+    let mut assets = AssetsManifest {
+        root_identity: identity(&root),
+        root_mount_id: None,
+        mount_anchor_identity: Some(identity(&anchor)),
+        mount_anchor_id: Some(anchor_mount_id),
+        session_identity: Some(identity(&session)),
+        run_identity: Some(identity(&root.join("run"))),
+        mount_namespace_identity: Some(super::asset_mount::current_namespace_identity().unwrap()),
+        root,
+        assets: Vec::new(),
+    };
     let original = assets.root.join("base.img");
     let file = fs::File::create(&original).unwrap();
     let placeholder = identity(&original);
@@ -92,6 +153,13 @@ fn detached_asset_placeholder_replays_but_replacement_is_rejected() {
     ));
     assert_eq!(fs::read(&original).unwrap(), b"foreign");
     drop(file);
+    fs::remove_file(&original).unwrap();
+    super::asset_mount::unmount(&assets.root).unwrap();
+    fs::remove_dir(assets.root.join("run")).unwrap();
+    fs::remove_dir(&assets.root).unwrap();
+    fs::remove_dir(&session).unwrap();
+    super::asset_mount::unmount(&anchor).unwrap();
+    fs::remove_dir(&anchor).unwrap();
 }
 
 #[test]

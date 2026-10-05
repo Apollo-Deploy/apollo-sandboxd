@@ -210,7 +210,7 @@ impl RuntimeService {
         // Revalidation includes each pinned artifact, even when its runtime is no longer default.
         let authority = Arc::clone(&self.authority);
         let pins = intent.pins.clone();
-        tokio::task::spawn_blocking(move || authority.artifacts(&pins))
+        let artifacts = tokio::task::spawn_blocking(move || authority.artifacts(&pins))
             .await
             .map_err(|_| Error::State)??;
         let key = intent.key.clone();
@@ -292,6 +292,7 @@ impl RuntimeService {
             manifest,
             guest: Mutex::new(None),
             exec_router: router.clone(),
+            volume_locks: std::sync::Mutex::new(artifacts.volumes),
             transport_epoch: std::sync::atomic::AtomicU64::new(0),
         });
         self.insert(Arc::clone(&vm)).await?;

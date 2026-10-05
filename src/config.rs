@@ -1,4 +1,4 @@
-pub use crate::config_execution::{BaseImage, Execution, OciSettings};
+pub use crate::config_execution::{ArtifactdSettings, BaseImage, Execution};
 use crate::{
     error::{Error, Result},
     security::path::SecureDir,

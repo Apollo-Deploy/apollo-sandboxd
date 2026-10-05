@@ -18,6 +18,8 @@ use std::{
 
 #[path = "native_api_contract/snapshot.rs"]
 mod snapshot;
+#[path = "native_api_contract/volume.rs"]
+mod volume;
 
 static OP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 use tokio::time::{Instant, sleep};
@@ -58,7 +60,11 @@ fn resource() -> Resources {
 
 fn sandbox_spec() -> SandboxSpec {
     SandboxSpec {
-        architecture: Architecture::X86_64,
+        architecture: if cfg!(target_arch = "aarch64") {
+            Architecture::Aarch64
+        } else {
+            Architecture::X86_64
+        },
         image: ImageDigest::new(format!("sha256:{}", required("APOLLO_NATIVE_BASE_DIGEST")))
             .expect("base digest"),
         kernel_profile: env::var("APOLLO_NATIVE_KERNEL_PROFILE")
@@ -404,6 +410,13 @@ async fn native_public_api_lifecycle_and_daemon_restart() {
     .await;
     stage(&mut file, "stop_2");
     assert!(matches!(final_stop, Response::Sandbox(_)));
+    inspect_until(&socket, &sandbox, |state| state == SandboxState::Stopped).await;
+    if env::var("APOLLO_NATIVE_VOLUME_QUALIFY").as_deref() == Ok("1") {
+        volume::qualify(&socket, &mut daemon, &binary, &config, &log, &mut file).await;
+    } else {
+        stage(&mut file, "dynamic_volume_qualification_not_requested");
+    }
+
     let _ = daemon.kill();
     let _ = daemon.wait();
 }

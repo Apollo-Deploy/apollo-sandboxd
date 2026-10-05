@@ -4,7 +4,7 @@ use rusqlite::Connection;
 pub fn initialize(connection: &Connection) -> Result<()> {
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if !(0..=20).contains(&version) {
+    if !(0..=23).contains(&version) {
         return Err(Error::Config("incompatible durable state version"));
     }
     if matches!(version, 1 | 3) {
@@ -198,6 +198,34 @@ pub fn initialize(connection: &Connection) -> Result<()> {
              PRAGMA user_version=20;
              COMMIT;",
         )?;
+    }
+    let current: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if current == 20 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE artifactd_image_handoffs (
+                 owner_uid INTEGER NOT NULL CHECK(owner_uid >= 0),
+                 operation_id TEXT NOT NULL,
+                 record BLOB NOT NULL CHECK(length(record) <= 524288),
+                 PRIMARY KEY(owner_uid, operation_id),
+                 FOREIGN KEY(owner_uid, operation_id) REFERENCES image_operations(owner_uid, operation_id)
+             ) STRICT;
+             PRAGMA user_version=21;
+             COMMIT;",
+        )?;
+    }
+    let current: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if current == 21 {
+        connection.execute_batch("BEGIN IMMEDIATE;
+        CREATE TABLE dynamic_volumes(owner_uid INTEGER NOT NULL,id TEXT NOT NULL CHECK(length(id)=64),operation_id TEXT NOT NULL,request_digest BLOB NOT NULL CHECK(length(request_digest)=32),size_bytes INTEGER NOT NULL CHECK(size_bytes>=1048576 AND size_bytes<=1073741824 AND size_bytes%4096=0),writable INTEGER NOT NULL CHECK(writable IN(0,1)),record BLOB,response BLOB NOT NULL,pending INTEGER NOT NULL CHECK(pending IN(0,1)),PRIMARY KEY(owner_uid,id),UNIQUE(owner_uid,operation_id)) STRICT;
+        PRAGMA user_version=22; COMMIT;")?;
+    }
+    let current:i64=connection.pragma_query_value(None,"user_version",|r|r.get(0))?;
+    if current==22 {
+        connection.execute_batch("BEGIN IMMEDIATE;
+        ALTER TABLE dynamic_volumes ADD COLUMN released INTEGER NOT NULL DEFAULT 0 CHECK(released IN(0,1));
+        CREATE TABLE volume_releases(owner_uid INTEGER NOT NULL,operation_id TEXT NOT NULL,backing_id TEXT NOT NULL,request_digest BLOB NOT NULL CHECK(length(request_digest)=32),response BLOB NOT NULL,pending INTEGER NOT NULL CHECK(pending IN(0,1)),PRIMARY KEY(owner_uid,operation_id)) STRICT;
+        PRAGMA user_version=23; COMMIT;")?;
     }
     validate_integrity(connection)?;
     Ok(())

@@ -17,6 +17,17 @@ pub fn validate_fd_count(request: &Request, count: usize) -> Result<()> {
     }
     let exec_start = matches!(request, Request::Guest { command, .. }
         if matches!(command.as_ref(), GuestCommand::ExecStart { .. }));
+    if let Request::Volume { command, .. } = request {
+        let expected = usize::from(matches!(
+            command.as_ref(),
+            sandboxd_protocol::VolumeCommand::Import { .. }
+        ));
+        return if count == expected {
+            Ok(())
+        } else {
+            Err(Error::Path)
+        };
+    }
     if !exec_start && count != 0 {
         return Err(Error::Path);
     }
@@ -109,12 +120,18 @@ pub fn recv_request_blocking(
     Ok((parsed.request_id, request, fds))
 }
 
-#[allow(unsafe_code)]
-/// Receives one bounded request without blocking a Tokio worker. SCM_RIGHTS
-/// must accompany the first bytes; the remainder is ordinary stream data.
 pub async fn recv_request(
     stream: &mut tokio::net::UnixStream,
 ) -> Result<(u64, Request, Vec<OwnedFd>)> {
+    recv_frame(stream).await
+}
+
+#[allow(unsafe_code)]
+/// Receives one bounded request without blocking a Tokio worker. SCM_RIGHTS
+/// must accompany the first bytes; the remainder is ordinary stream data.
+pub(super) async fn recv_frame<T: serde::de::DeserializeOwned>(
+    stream: &mut tokio::net::UnixStream,
+) -> Result<(u64, T, Vec<OwnedFd>)> {
     use std::io;
     use tokio::io::AsyncReadExt;
     use tokio::io::Interest;

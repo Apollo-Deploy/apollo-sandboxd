@@ -26,6 +26,7 @@ pub(crate) struct ExecManifest {
     pub(crate) exec: ExecId,
     pub(crate) request_digest: [u8; 32],
     pub(crate) output_policy: OutputPolicy,
+    pub(crate) output_bytes: u64,
 }
 
 pub struct ExecEventRouter {
@@ -53,11 +54,12 @@ impl ExecEventRouter {
         stdout: Option<OutputSink>,
         stderr: Option<OutputSink>,
         policy: OutputPolicy,
+        output_limit: u64,
     ) -> Result<()> {
         self.bridge
             .lock()
             .map_err(|_| crate::error::Error::State)?
-            .register(exec, journal, stdout, stderr, policy)
+            .register(exec, journal, stdout, stderr, policy, output_limit)
     }
 
     pub fn contains(&self, exec: &ExecId) -> Result<bool> {
@@ -74,6 +76,7 @@ impl ExecEventRouter {
         exec: &ExecId,
         request_digest: [u8; 32],
         output_policy: OutputPolicy,
+        output_bytes: u64,
     ) -> Result<PathBuf> {
         fs::create_dir_all(root)?;
         #[cfg(unix)]
@@ -83,6 +86,7 @@ impl ExecEventRouter {
             exec: exec.clone(),
             request_digest,
             output_policy,
+            output_bytes,
         })?;
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -97,10 +101,17 @@ impl ExecEventRouter {
         Ok(path)
     }
 
-    pub fn manifest_matches(root: &Path, exec: &ExecId, request_digest: [u8; 32]) -> Result<bool> {
+    pub fn manifest_matches(
+        root: &Path,
+        exec: &ExecId,
+        request_digest: [u8; 32],
+        output_bytes: u64,
+    ) -> Result<bool> {
         let bytes = fs::read(root.join(exec.as_str()).join(MANIFEST))?;
         let manifest: ExecManifest = codec::decode_body(&bytes)?;
-        Ok(manifest.exec == *exec && manifest.request_digest == request_digest)
+        Ok(manifest.exec == *exec
+            && manifest.request_digest == request_digest
+            && manifest.output_bytes == output_bytes)
     }
 
     /// Handles one unsolicited event. Output is journaled before sink write;

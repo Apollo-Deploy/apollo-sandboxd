@@ -1,6 +1,23 @@
 use crate::error::{Error, Result};
-use rusqlite::{OptionalExtension, params};
-use sha2::Digest;
+use rusqlite::OptionalExtension;
+#[cfg(target_os = "linux")]
+use rusqlite::params;
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ArtifactdImageHandoff {
+    pub prepared_artifact_id: String,
+    pub manifest_digest: String,
+    pub lease_id: String,
+    pub architecture: String,
+    pub resolve_operation: String,
+    pub open_config_operation: String,
+    pub open_prepared_operation: String,
+    pub release_operation: String,
+    pub phase: u8,
+    pub layers: u32,
+    pub config_json: Option<Vec<u8>>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedImageRecord {
@@ -19,30 +36,64 @@ pub struct PreparedImageRecord {
 }
 
 impl super::store::Store {
-    pub(crate) fn image_operation_resolution(
+    #[cfg(target_os = "linux")]
+    pub(crate) fn artifactd_image_handoff(
         &self,
         uid: u32,
         operation: &sandboxd_protocol::OperationId,
-    ) -> Result<Option<String>> {
-        Ok(self.connection.query_row(
-            "SELECT resolved_digest FROM image_operations WHERE owner_uid=?1 AND operation_id=?2",
+    ) -> Result<Option<ArtifactdImageHandoff>> {
+        let bytes: Option<Vec<u8>> = self.connection.query_row(
+            "SELECT record FROM artifactd_image_handoffs WHERE owner_uid=?1 AND operation_id=?2",
             params![uid, operation.as_str()],
             |row| row.get(0),
-        ).optional()?.flatten())
+        ).optional()?;
+        bytes
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| Error::State))
+            .transpose()
     }
 
-    pub(crate) fn record_image_resolution(
+    #[cfg(target_os = "linux")]
+    pub(crate) fn create_artifactd_image_handoff(
         &self,
         uid: u32,
         operation: &sandboxd_protocol::OperationId,
-        digest: &str,
+        handoff: &ArtifactdImageHandoff,
+    ) -> Result<ArtifactdImageHandoff> {
+        let bytes = serde_json::to_vec(handoff).map_err(|_| Error::State)?;
+        if bytes.len() > 524_288 || handoff.phase != 0 {
+            return Err(Error::State);
+        }
+        self.connection.execute(
+            "INSERT INTO artifactd_image_handoffs(owner_uid,operation_id,record) VALUES(?1,?2,?3) ON CONFLICT(owner_uid,operation_id) DO NOTHING",
+            params![uid, operation.as_str(), bytes],
+        )?;
+        let saved = self
+            .artifactd_image_handoff(uid, operation)?
+            .ok_or(Error::State)?;
+        if saved.prepared_artifact_id != handoff.prepared_artifact_id
+            || saved.manifest_digest != handoff.manifest_digest
+            || saved.lease_id != handoff.lease_id
+            || saved.architecture != handoff.architecture
+        {
+            return Err(Error::State);
+        }
+        Ok(saved)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn update_artifactd_image_handoff(
+        &self,
+        uid: u32,
+        operation: &sandboxd_protocol::OperationId,
+        handoff: &ArtifactdImageHandoff,
     ) -> Result<()> {
-        if !digest.starts_with("sha256:") || digest.len() != 71 {
+        let bytes = serde_json::to_vec(handoff).map_err(|_| Error::State)?;
+        if bytes.len() > 524_288 || handoff.phase > 3 {
             return Err(Error::State);
         }
         let changed = self.connection.execute(
-            "UPDATE image_operations SET resolved_digest=?1 WHERE owner_uid=?2 AND operation_id=?3 AND pending=1",
-            params![digest, uid, operation.as_str()],
+            "UPDATE artifactd_image_handoffs SET record=?1 WHERE owner_uid=?2 AND operation_id=?3",
+            params![bytes, uid, operation.as_str()],
         )?;
         if changed != 1 {
             return Err(Error::State);
@@ -50,6 +101,7 @@ impl super::store::Store {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn record_prepared_image(&self, record: &PreparedImageRecord) -> Result<()> {
         if !record.digest.starts_with("sha256:")
             || record.rootfs_sha256.len() != 64
@@ -89,6 +141,7 @@ impl super::store::Store {
         ).optional()?)
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn publish_prepared_image(&self, digest: &str) -> Result<()> {
         let changed = self.connection.execute(
             "UPDATE prepared_images SET published=1 WHERE digest=?1",
@@ -100,6 +153,7 @@ impl super::store::Store {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn retire_unpublished_image(&self, digest: &str) -> Result<()> {
         self.connection.execute(
             "DELETE FROM prepared_images WHERE digest=?1 AND published=0",
@@ -109,7 +163,7 @@ impl super::store::Store {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use crate::config::{LeaseConfig, Quotas};
@@ -137,11 +191,12 @@ mod tests {
         .expect("store")
     }
 
-    fn command(reference: &str) -> ImageCommand {
-        ImageCommand::Pull {
-            reference: reference.into(),
-            username: None,
-            password: None,
+    fn command(artifact_id: &str) -> ImageCommand {
+        ImageCommand::ImportPrepared {
+            prepared_artifact_id: artifact_id.into(),
+            manifest_digest: format!("sha256:{}", "a".repeat(64)),
+            lease_id: "lease-one".into(),
+            architecture: sandboxd_protocol::Architecture::X86_64,
         }
     }
 
@@ -149,7 +204,7 @@ mod tests {
     fn image_receipt_replays_and_conflicts_after_reopen() {
         let directory = tempfile::tempdir().expect("directory");
         let operation = OperationId::with_sequence(1, "image").expect("operation");
-        let request = command("registry.example/app:latest");
+        let request = command("artifact-one");
         let (digest, pending) = store(directory.path())
             .admit_image_operation(1000, &operation, 1, &request)
             .expect("admit");
@@ -173,12 +228,8 @@ mod tests {
             .admit_image_operation(1000, &operation, 1, &request)
             .expect("terminal replay");
         assert_eq!(replay, Some(terminal));
-        let conflict = reopened.admit_image_operation(
-            1000,
-            &operation,
-            1,
-            &command("registry.example/app:other"),
-        );
+        let conflict =
+            reopened.admit_image_operation(1000, &operation, 1, &command("artifact-two"));
         assert!(conflict.is_err());
         assert_eq!(digest.len(), 32);
     }
@@ -236,7 +287,7 @@ mod tests {
         let op1 = OperationId::with_sequence(1, "image-1").unwrap();
         let op2 = OperationId::with_sequence(2, "image-2").unwrap();
         let op3 = OperationId::with_sequence(3, "image-3").unwrap();
-        let request = command("registry.example/app:latest");
+        let request = command("artifact-one");
         let (digest, _) = store
             .admit_image_operation(1000, &op1, 1, &request)
             .unwrap();
@@ -279,14 +330,11 @@ impl super::store::Store {
         command: &sandboxd_protocol::ImageCommand,
     ) -> Result<([u8; 32], Option<sandboxd_protocol::Response>)> {
         use sha2::{Digest, Sha256};
-        let body = sandboxd_protocol::codec::encode_body(&(
-            "image_operation",
-            command_name(command),
-            image_reference(command),
-            image_username(command),
-            self.image_secret_digest(command),
-        ))?;
-        let digest: [u8; 32] = Sha256::digest(body).into();
+        let digest: [u8; 32] = Sha256::digest(sandboxd_protocol::codec::encode_body(&(
+            "artifactd_image_import",
+            command,
+        ))?)
+        .into();
         let existing: Option<(Vec<u8>, Vec<u8>)> = self.connection.query_row(
             "SELECT request_digest,response FROM image_operations WHERE owner_uid=?1 AND operation_id=?2",
             rusqlite::params![uid, operation.as_str()],
@@ -351,42 +399,6 @@ impl super::store::Store {
             rusqlite::params![sandboxd_protocol::codec::encode_body(response)?, uid, operation.as_str(), digest.as_slice()],
         )?;
         Ok(())
-    }
-}
-
-fn command_name(command: &sandboxd_protocol::ImageCommand) -> &'static str {
-    match command {
-        sandboxd_protocol::ImageCommand::Pull { .. } => "pull",
-        sandboxd_protocol::ImageCommand::ImportLayout { .. } => "import_layout",
-    }
-}
-fn image_reference(command: &sandboxd_protocol::ImageCommand) -> Option<&str> {
-    match command {
-        sandboxd_protocol::ImageCommand::Pull { reference, .. } => Some(reference),
-        sandboxd_protocol::ImageCommand::ImportLayout { relative_layout } => Some(relative_layout),
-    }
-}
-fn image_username(command: &sandboxd_protocol::ImageCommand) -> Option<&str> {
-    match command {
-        sandboxd_protocol::ImageCommand::Pull { username, .. } => username.as_deref(),
-        sandboxd_protocol::ImageCommand::ImportLayout { .. } => None,
-    }
-}
-impl super::store::Store {
-    fn image_secret_digest(&self, command: &sandboxd_protocol::ImageCommand) -> Option<[u8; 32]> {
-        match command {
-            sandboxd_protocol::ImageCommand::Pull {
-                password: Some(secret),
-                ..
-            } => {
-                let mut hasher = sha2::Sha256::new();
-                hasher.update(b"apollo-sandboxd image request v1");
-                hasher.update(self.operation_key);
-                hasher.update(secret.0.as_bytes());
-                Some(hasher.finalize().into())
-            }
-            _ => None,
-        }
     }
 }
 

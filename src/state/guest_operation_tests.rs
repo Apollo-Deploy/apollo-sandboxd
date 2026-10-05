@@ -3,7 +3,9 @@ use super::{SessionKey, Store};
 use crate::config::{IdentityPools, LeaseConfig, Quotas};
 use crate::state::{SessionPins, SessionPreparation};
 use rusqlite::{TransactionBehavior, params};
-use sandboxd_protocol::{ApiError, ErrorCode, Fence, GuestCommand, OperationId, Response, codec};
+use sandboxd_protocol::{
+    ApiError, ErrorCode, Fence, GuestCommand, OperationId, OperationReceiptState, Response, codec,
+};
 use sandboxd_protocol::{
     Architecture, GuestReply, ImageDigest, Lifetimes, Mutation, NetworkMode, Persistence,
     Resources, SandboxGeneration, SandboxId, SandboxSpec, SandboxState, SessionGeneration,
@@ -260,6 +262,58 @@ fn admission_replays_pending_and_completed_results_and_conflicts_on_body_change(
 }
 
 #[test]
+fn operation_inspection_tracks_guest_admission_and_completion() {
+    let (_directory, mut store, fence, command) = active_store();
+    let operation = OperationId::with_sequence(1, "guest-inspect").unwrap();
+    let expected_digest = hex::encode(digest(&fence, &command).unwrap());
+
+    assert!(matches!(
+        store
+            .admit_guest_operation_with_sinks(1000, &operation, &fence, &command, 0, Some(1), 1100,)
+            .unwrap(),
+        GuestAdmission::Pending(_)
+    ));
+    let pending = store.inspect_operation(1000, &operation, 1).unwrap();
+    assert_eq!(pending.state, OperationReceiptState::Pending);
+    assert_eq!(pending.operation, operation);
+    assert_eq!(pending.operation_sequence, 1);
+    assert_eq!(pending.accepted_sequence, 1);
+    assert_eq!(
+        pending.request_digest.as_deref(),
+        Some(expected_digest.as_str())
+    );
+    assert_eq!(
+        pending.response.as_deref(),
+        Some(&Response::GuestPending {
+            operation: operation.clone(),
+        })
+    );
+
+    // Trusted runtime completion metadata fixture, not evidence of guest execution.
+    let response = Response::Guest(GuestReply::ExecExit {
+        exec: "exec-1".parse().unwrap(),
+        exit_code: Some(0),
+        signal: None,
+        timed_out: false,
+    });
+    store
+        .complete_guest_operation(
+            1000,
+            &operation,
+            digest(&fence, &command).unwrap(),
+            &response,
+        )
+        .unwrap();
+    let complete = store.inspect_operation(1000, &operation, 1).unwrap();
+    assert_eq!(complete.state, OperationReceiptState::Complete);
+    assert_eq!(
+        complete.request_digest.as_deref(),
+        Some(expected_digest.as_str())
+    );
+    assert_eq!(complete.response.as_deref(), Some(&response));
+}
+
+#[test]
 fn secret_injection_marker_precedes_delivery_and_survives_sqlite_reopen() {
     use sandboxd_protocol::exec::{ExecutionSpec, OutputPolicy, SecretValue, StdinMode};
     let (directory, mut store, fence, _) = active_store();
@@ -270,6 +324,10 @@ fn secret_injection_marker_precedes_delivery_and_survives_sqlite_reopen() {
         cwd: "/".into(),
         uid: 0,
         gid: 0,
+        supplementary_groups: Vec::new(),
+        readonly_root: false,
+        mounts: Vec::new(),
+        max_processes: 64,
         environment: Default::default(),
         secret_environment: [(
             "TOKEN".into(),
@@ -281,6 +339,7 @@ fn secret_injection_marker_precedes_delivery_and_survives_sqlite_reopen() {
         timeout_ms: 1000,
         detached: true,
         output_policy: OutputPolicy::Disabled,
+        output_bytes: 0,
     };
     let command = GuestCommand::ExecStart {
         spec: Box::new(spec),
